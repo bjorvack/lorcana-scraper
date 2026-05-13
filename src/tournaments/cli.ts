@@ -119,7 +119,6 @@ function parseArgs(argv: string[]): Args {
       case "--help":
         printUsage();
         process.exit(0);
-      // eslint-disable-next-line no-fallthrough
       default:
         throw new Error(`Unknown argument: ${k}`);
     }

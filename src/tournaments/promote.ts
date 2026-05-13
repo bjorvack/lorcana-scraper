@@ -242,10 +242,7 @@ function createGithubRelease(args: Args, outDir: string, notesPath: string): voi
     notesPath,
   ];
   if (args.prerelease) cliArgs.push("--prerelease");
-  const assets = [
-    resolve(outDir, "dataset.json"),
-    resolve(outDir, "dataset.json.sha256"),
-  ];
+  const assets = [resolve(outDir, "dataset.json"), resolve(outDir, "dataset.json.sha256")];
   const report = resolve(outDir, "resolution-report.json");
   if (existsSync(report)) assets.push(report);
   const review = resolve(outDir, "decks-needing-review.json");
