@@ -16,6 +16,7 @@
  * pinned `cards-vN`.
  */
 import { fetch } from "undici";
+import { HttpCache } from "./httpCache.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./types.js";
 
 const BASE = "https://api.dotgg.gg/cgfw";
@@ -132,6 +133,13 @@ export interface LorcanaGgOptions {
    * share the same bucket so this is sustained, not per-worker.
    */
   readonly requestSpacingMs?: number;
+  /**
+   * Optional directory in which to persist cached JSON responses for
+   * immutable endpoints (individual tournaments + decks). With a cache
+   * directory set, re-runs skip the network for any URL we've previously
+   * fetched successfully — genuinely free tournaments on subsequent runs.
+   */
+  readonly cacheDir?: string;
 }
 
 interface TournamentSummary {
@@ -182,9 +190,16 @@ export class LorcanaGgAdapter implements SourceAdapter {
   readonly sourceName = "lorcana.gg";
 
   private readonly rateLimiter: RateLimiter;
+  private readonly cache: HttpCache | null;
 
   constructor(private readonly opts: LorcanaGgOptions = {}) {
     this.rateLimiter = new RateLimiter(opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS);
+    this.cache = opts.cacheDir ? new HttpCache(opts.cacheDir) : null;
+  }
+
+  /** Expose cache hit/miss counters for end-of-run reporting. */
+  cacheStats(): { hits: number; misses: number } | null {
+    return this.cache?.stats() ?? null;
   }
 
   async listTournaments(): Promise<TournamentRef[]> {
@@ -294,6 +309,14 @@ export class LorcanaGgAdapter implements SourceAdapter {
   }
 
   private async getJson<T>(url: string, fallback?: T): Promise<T> {
+    // Only cache individual tournament + deck endpoints; listing pages are
+    // mutable as new tournaments appear.
+    const cacheable =
+      this.cache !== null && (url.includes("/gettournament?") || url.includes("/getdeck?"));
+    if (cacheable) {
+      const cached = await this.cache!.get<T>(url);
+      if (cached !== null) return cached;
+    }
     let lastErr: unknown;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       await this.rateLimiter.acquire();
@@ -329,7 +352,9 @@ export class LorcanaGgAdapter implements SourceAdapter {
           continue;
         }
         if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-        return (await res.json()) as T;
+        const parsed = (await res.json()) as T;
+        if (cacheable) await this.cache!.set(url, parsed);
+        return parsed;
       } catch (err) {
         lastErr = err;
         if (attempt === MAX_ATTEMPTS) break;

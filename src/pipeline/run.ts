@@ -151,6 +151,9 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       minPlayers: opts.minPlayers,
       maxDecksPerTournament: opts.maxDecksPerTournament,
       requestSpacingMs: opts.requestSpacingMs,
+      // Always-on persistent HTTP cache for immutable endpoints.
+      // Delete <outDir>/http-cache to invalidate.
+      cacheDir: resolve(outDirAbs, "http-cache"),
       onDeckFetched: (a) => progress.noteDeck(a),
       onTournamentStart: (a) => progress.setCurrentTournamentDeckCount(a.deckCount),
     });
@@ -203,6 +206,14 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
         writePartial({ opts, cards, enabled, prior, added, report });
         process.stderr.write(`  [persisted snapshot after ${i}/${limited.length}]\n`);
       }
+    }
+    // Surface HTTP cache effectiveness. Hits = tournaments/decks served
+    // from disk, which is why re-runs are cheap.
+    const cacheStats = ad instanceof LorcanaGgAdapter ? ad.cacheStats() : null;
+    if (cacheStats) {
+      process.stderr.write(
+        `[${adapter.sourceName}] http cache: ${cacheStats.hits} hits / ${cacheStats.misses} misses\n`,
+      );
     }
   }
 
@@ -342,6 +353,7 @@ function applyAdapterOptions(
     minPlayers?: number;
     maxDecksPerTournament?: number;
     requestSpacingMs?: number;
+    cacheDir?: string;
     onDeckFetched?: (a: { resolved: boolean; failed: boolean }) => void;
     onTournamentStart?: (a: { deckCount: number }) => void;
   },
@@ -355,6 +367,7 @@ function applyAdapterOptions(
       minPlayers: opts.minPlayers,
       maxDecksPerTournament: opts.maxDecksPerTournament,
       requestSpacingMs: opts.requestSpacingMs,
+      cacheDir: opts.cacheDir,
       onDeckFetched: opts.onDeckFetched,
       onTournamentStart: opts.onTournamentStart,
     });
