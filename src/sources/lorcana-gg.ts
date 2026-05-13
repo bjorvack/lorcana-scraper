@@ -43,9 +43,21 @@ const JITTER_RATIO = 0.15;
 /**
  * If the server tells us to wait longer than this on a 429, we bail and
  * let the orchestrator resume on a future run rather than block CI for
- * an hour. Cloudflare 1015 cooldowns are usually 5-10 minutes.
+ * an hour. Cloudflare 1015 cooldowns are usually 5-10 minutes, so 15 min
+ * gives us enough headroom to nap through one and keep the warmed state
+ * (card index, prior dataset, HTTP cache) rather than restart.
  */
-const MAX_RETRY_AFTER_MS = 60_000;
+const MAX_RETRY_AFTER_MS = 15 * 60_000;
+
+/**
+ * On every 429 we permanently multiply the rate-limit interval by this
+ * factor, up to {@link MAX_ADAPTIVE_SPACING_MS}. The idea: if the server
+ * is pushing back, the configured rate is too fast for *this* session; a
+ * one-way slowdown auto-discovers the sustainable ceiling without needing
+ * the operator to tune `--rate-limit-ms` by hand.
+ */
+const ADAPTIVE_SLOWDOWN_FACTOR = 1.5;
+const MAX_ADAPTIVE_SPACING_MS = 5_000;
 const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
 
 /**
@@ -59,6 +71,7 @@ class RateLimiter {
   constructor(
     private intervalMs: number,
     private jitterRatio = JITTER_RATIO,
+    private readonly maxIntervalMs = MAX_ADAPTIVE_SPACING_MS,
   ) {}
   async acquire(): Promise<void> {
     const now = Date.now();
@@ -72,6 +85,14 @@ class RateLimiter {
   /** Push the next slot back (after a 429). */
   penalise(extraMs: number): void {
     this.nextSlot = Math.max(this.nextSlot, Date.now()) + extraMs;
+  }
+  /**
+   * Permanently widen the spacing for the remainder of the session, capped
+   * at {@link maxIntervalMs}. Returns the new interval so callers can log.
+   */
+  slowDown(factor = ADAPTIVE_SLOWDOWN_FACTOR): number {
+    this.intervalMs = Math.min(this.maxIntervalMs, Math.ceil(this.intervalMs * factor));
+    return this.intervalMs;
   }
   get intervalMillis(): number {
     return this.intervalMs;
@@ -287,8 +308,15 @@ export class LorcanaGgAdapter implements SourceAdapter {
           }
           // Push every other in-flight worker out by retryAfter as well — they
           // were issued at roughly the same rate so they'd all 429 in a row.
-          this.rateLimiter.penalise(Math.max(retryAfterMs, backoff(attempt)));
-          await sleep(Math.max(retryAfterMs, backoff(attempt)));
+          const waitMs = Math.max(retryAfterMs, backoff(attempt));
+          this.rateLimiter.penalise(waitMs);
+          // Adaptive slowdown: the configured rate is too fast for this
+          // session, so widen the interval permanently (capped).
+          const newInterval = this.rateLimiter.slowDown();
+          console.warn(
+            `  [lorcana.gg] 429 on ${url} — sleeping ${(waitMs / 1000).toFixed(0)}s, new spacing ${newInterval}ms`,
+          );
+          await sleep(waitMs);
           continue;
         }
         if (res.status === 404) {
