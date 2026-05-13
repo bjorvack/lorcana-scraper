@@ -25,6 +25,12 @@ import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter } from "../sources/types.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
+import { normaliseKey } from "../resolve/normalise.js";
+import {
+  defaultDotggCachePath,
+  loadDotggNameIndex,
+  type DotggNameIndex,
+} from "../resolve/dotggNameIndex.js";
 import { mergeTournaments, tournamentKeyOf } from "./merge.js";
 import { ReportBuilder } from "./report.js";
 import { writeTournamentsArtifacts } from "./release.js";
@@ -70,6 +76,23 @@ export interface RunResult {
 export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResult> {
   const cards = loadCards(opts.cardsPath);
   const index = buildCardIndex(cards.cards);
+
+  // Secondary lookup index: maps dotgg printing ids to (name, title) for
+  // the ~3% of cases parsePrintingId can't handle directly (C1/Q1/Q2 sets,
+  // letter-suffix variants like P2-024B, etc.). Resolved through Lorcast
+  // by name so we still emit a real `Card.id`.
+  const outDirAbs = resolve(process.cwd(), opts.outDir);
+  const dotggIndex = await loadDotggNameIndex(defaultDotggCachePath(outDirAbs)).catch((err) => {
+    process.stderr.write(
+      `[warn] couldn't load dotgg name index (${(err as Error).message}); name fallback disabled\n`,
+    );
+    return null;
+  });
+  if (dotggIndex) {
+    process.stderr.write(
+      `[resolve] loaded dotgg name index: ${dotggIndex.byId.size} cards (fetched ${dotggIndex.fetchedAt})\n`,
+    );
+  }
 
   // Resume: if `--prior` wasn't given but `<outDir>/dataset.json` exists,
   // pick it up automatically. This makes re-running the same command after
@@ -157,6 +180,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
           ref,
           raw,
           index,
+          dotggIndex,
           report,
         });
         if (tournament) {
@@ -211,11 +235,12 @@ function projectTournament(args: {
   ref: { sourceUrl: string; name?: string; date?: string };
   raw: RawTournament;
   index: CardIndex;
+  dotggIndex: DotggNameIndex | null;
   report: ReportBuilder;
 }): TournamentT | null {
-  const { adapterName, raw, index, report } = args;
+  const { adapterName, raw, index, dotggIndex, report } = args;
   const decks = raw.decks
-    .map((raw) => projectDeck(adapterName, raw, index, report))
+    .map((raw) => projectDeck(adapterName, raw, index, dotggIndex, report))
     .filter((d): d is TournamentT["decks"][number] => d !== null);
   if (decks.length === 0) return null;
 
@@ -233,17 +258,14 @@ function projectDeck(
   sourceName: string,
   raw: RawDeck,
   index: CardIndex,
+  dotggIndex: DotggNameIndex | null,
   report: ReportBuilder,
 ): TournamentT["decks"][number] | null {
   const resolvedCards: { cardId: string; count: number }[] = [];
   const inksUsed = new Set<InkT>();
 
   for (const { rawName, count } of raw.cards) {
-    let card = null as (typeof index.byPrinting extends Map<infer _K, infer V> ? V : never) | null;
-    const printing = parsePrintingId(rawName);
-    if (printing) card = index.byPrinting.get(printing.key) ?? null;
-    if (!card) card = index.byExact.get(rawName) ?? null;
-
+    const card = resolveCard(rawName, index, dotggIndex);
     if (card) {
       report.noteCard(sourceName, rawName, true);
       resolvedCards.push({ cardId: card.id, count });
@@ -306,6 +328,43 @@ function applyAdapterOptions(
     });
   }
   return adapter;
+}
+
+/**
+ * Resolve a dotgg printing id to a Lorcast `Card`. Strategy, in order:
+ *   1. Direct printing-id match (`<setCode>-<NNN>` → Card via parsePrintingId).
+ *   2. dotgg name fallback: look up the printing id in dotgg's full card
+ *      catalog → get (name, title) → match Lorcast by display name.
+ *      Catches `C1`/`Q1`/`Q2` and letter-suffix variants like `P2-024B`.
+ *   3. Normalised-name fallback (accent-stripped, lowercased).
+ */
+function resolveCard(
+  rawName: string,
+  index: CardIndex,
+  dotggIndex: DotggNameIndex | null,
+): CardIndex["byPrinting"] extends Map<unknown, infer V> ? V | null : never {
+  const printing = parsePrintingId(rawName);
+  if (printing) {
+    const byPrinting = index.byPrinting.get(printing.key);
+    if (byPrinting) return byPrinting;
+  }
+  if (dotggIndex) {
+    const entry = dotggIndex.byId.get(rawName);
+    if (entry) {
+      const displayName = entry.title ? `${entry.name} - ${entry.title}` : entry.name;
+      const byExact = index.byExact.get(displayName);
+      if (byExact) return byExact;
+      const byNormalised = index.byNormalised.get(normaliseKey(displayName));
+      if (byNormalised) return byNormalised;
+      // Single-printing fallback: if a card with this name has exactly one
+      // printing in Lorcast, use it (handles minor title spelling drift).
+      if (!entry.title) {
+        const candidates = index.byNameVersion.get(entry.name.toLowerCase()) ?? [];
+        if (candidates.length === 1) return candidates[0]!;
+      }
+    }
+  }
+  return null as CardIndex["byPrinting"] extends Map<unknown, infer V> ? V | null : never;
 }
 
 function writePartial(args: {
