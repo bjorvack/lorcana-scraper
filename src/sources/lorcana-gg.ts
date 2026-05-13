@@ -59,6 +59,14 @@ const MAX_RETRY_AFTER_MS = 15 * 60_000;
  */
 const ADAPTIVE_SLOWDOWN_FACTOR = 1.5;
 const MAX_ADAPTIVE_SPACING_MS = 5_000;
+/**
+ * With N concurrent workers, a single Cloudflare 1015 event typically
+ * produces N near-simultaneous 429 responses (all workers had requests
+ * in-flight when the limit tripped). Without a debounce each one would
+ * independently multiply the interval, blowing past the sustainable
+ * rate. Debounce so we only slow down once per "event window".
+ */
+const SLOWDOWN_DEBOUNCE_MS = 30_000;
 const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
 
 /**
@@ -87,11 +95,18 @@ class RateLimiter {
   penalise(extraMs: number): void {
     this.nextSlot = Math.max(this.nextSlot, Date.now()) + extraMs;
   }
+  private lastSlowdownAt = 0;
   /**
    * Permanently widen the spacing for the remainder of the session, capped
    * at {@link maxIntervalMs}. Returns the new interval so callers can log.
+   * Debounced: calls within {@link SLOWDOWN_DEBOUNCE_MS} of the previous
+   * one are treated as the same 1015 event and ignored so concurrent
+   * workers don't compound the multiplier.
    */
   slowDown(factor = ADAPTIVE_SLOWDOWN_FACTOR): number {
+    const now = Date.now();
+    if (now - this.lastSlowdownAt < SLOWDOWN_DEBOUNCE_MS) return this.intervalMs;
+    this.lastSlowdownAt = now;
     this.intervalMs = Math.min(this.maxIntervalMs, Math.ceil(this.intervalMs * factor));
     return this.intervalMs;
   }
