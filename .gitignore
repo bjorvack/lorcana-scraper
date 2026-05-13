@@ -3,6 +3,7 @@ dist
 cache
 out
 prior
+backfill
 coverage
 .DS_Store
 *.log

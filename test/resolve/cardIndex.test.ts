@@ -46,12 +46,22 @@ describe("parsePrintingId", () => {
     expect(parsePrintingId("D23-003")).toEqual({ key: "D23-003", setCode: "D23", cardNumber: 3 });
     expect(parsePrintingId("cp-7")).toEqual({ key: "cp-007", setCode: "cp", cardNumber: 7 });
   });
-  it("rejects 3-part ids (until we have a real example to map)", () => {
-    expect(parsePrintingId("001-P1-007")).toBeNull();
+  it("collapses 3-part legacy ids to the promo printing", () => {
+    expect(parsePrintingId("001-P1-005")).toEqual({ key: "P1-005", setCode: "P1", cardNumber: 5 });
+    expect(parsePrintingId("002-D23-003")).toEqual({
+      key: "D23-003",
+      setCode: "D23",
+      cardNumber: 3,
+    });
+  });
+  it("rejects literal 'undefined' / null / empty", () => {
+    expect(parsePrintingId("undefined")).toBeNull();
+    expect(parsePrintingId("null")).toBeNull();
+    expect(parsePrintingId("")).toBeNull();
+    expect(parsePrintingId("  ")).toBeNull();
   });
   it("rejects garbage", () => {
     expect(parsePrintingId("rainbow")).toBeNull();
-    expect(parsePrintingId("")).toBeNull();
     expect(parsePrintingId("-1")).toBeNull();
   });
 });
