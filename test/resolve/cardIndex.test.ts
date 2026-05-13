@@ -41,10 +41,18 @@ describe("parsePrintingId", () => {
   it("parses unpadded ids", () => {
     expect(parsePrintingId("10-174")).toEqual({ key: "10-174", setCode: "10", cardNumber: 174 });
   });
+  it("parses promo / alphanumeric set codes", () => {
+    expect(parsePrintingId("P1-029")).toEqual({ key: "P1-029", setCode: "P1", cardNumber: 29 });
+    expect(parsePrintingId("D23-003")).toEqual({ key: "D23-003", setCode: "D23", cardNumber: 3 });
+    expect(parsePrintingId("cp-7")).toEqual({ key: "cp-007", setCode: "cp", cardNumber: 7 });
+  });
+  it("rejects 3-part ids (until we have a real example to map)", () => {
+    expect(parsePrintingId("001-P1-007")).toBeNull();
+  });
   it("rejects garbage", () => {
     expect(parsePrintingId("rainbow")).toBeNull();
     expect(parsePrintingId("")).toBeNull();
-    expect(parsePrintingId("abc-1")).toBeNull();
+    expect(parsePrintingId("-1")).toBeNull();
   });
 });
 

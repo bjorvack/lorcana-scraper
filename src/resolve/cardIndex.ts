@@ -44,20 +44,24 @@ export function printingKey(setCode: string, cardNumber: number): string {
 }
 
 /**
- * Parse a printing id of the form `<setCode>-<NNN>` (e.g. `006-049`),
- * returning the (already-padded) canonical key suitable for `byPrinting`
- * lookup, plus the raw parts.
+ * Parse a printing id of the form `<setCode>-<NNN>` (e.g. `006-049`,
+ * `P1-029`, `D23-003`, `cp-007`). Returns null if the input is not in
+ * `<setCode>-<digits>` shape (lorcana.gg occasionally emits 3-part ids
+ * for reprints/variants which we drop until we have a real example to
+ * cross-reference against Lorcast).
  *
- * Returns null if the string doesn't match the expected shape.
+ * Numeric set codes are normalised by stripping leading zeros so the
+ * lookup matches `Card.setCode` (which is `"1"` not `"001"`).
  */
 export function parsePrintingId(raw: string): {
   key: string;
   setCode: string;
   cardNumber: number;
 } | null {
-  const m = /^(\d{1,4})-(\d{1,4})$/.exec(raw.trim());
+  const m = /^([A-Za-z0-9]+)-(\d{1,4})$/.exec(raw.trim());
   if (!m) return null;
-  const setCode = String(Number.parseInt(m[1]!, 10));
+  const rawSet = m[1]!;
+  const setCode = /^\d+$/.test(rawSet) ? String(Number.parseInt(rawSet, 10)) : rawSet;
   const cardNumber = Number.parseInt(m[2]!, 10);
   return { key: printingKey(setCode, cardNumber), setCode, cardNumber };
 }
