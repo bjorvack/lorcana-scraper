@@ -4,6 +4,8 @@ cache
 out
 prior
 backfill
+release-v*
+release-dryrun
 coverage
 .DS_Store
 *.log

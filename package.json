@@ -15,6 +15,7 @@
     "scrape:tournaments": "tsx src/tournaments/cli.ts",
     "tournaments:validate": "tsx src/tournaments/validate.ts",
     "tournaments:merge-shards": "tsx src/tournaments/merge-shards.ts",
+    "tournaments:promote": "tsx src/tournaments/promote.ts",
     "tournaments:unresolved": "tsx src/tournaments/unresolved.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
