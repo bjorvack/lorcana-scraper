@@ -219,6 +219,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     outDir: resolve(process.cwd(), opts.outDir),
     dataset,
     report: finalReport,
+    affectedDecks: report.affectedDecks(),
   });
 
   return {
@@ -240,7 +241,7 @@ function projectTournament(args: {
 }): TournamentT | null {
   const { adapterName, raw, index, dotggIndex, report } = args;
   const decks = raw.decks
-    .map((raw) => projectDeck(adapterName, raw, index, dotggIndex, report))
+    .map((rawDeck) => projectDeck(adapterName, raw, rawDeck, index, dotggIndex, report))
     .filter((d): d is TournamentT["decks"][number] => d !== null);
   if (decks.length === 0) return null;
 
@@ -256,6 +257,7 @@ function projectTournament(args: {
 
 function projectDeck(
   sourceName: string,
+  rawTournament: RawTournament,
   raw: RawDeck,
   index: CardIndex,
   dotggIndex: DotggNameIndex | null,
@@ -263,6 +265,7 @@ function projectDeck(
 ): TournamentT["decks"][number] | null {
   const resolvedCards: { cardId: string; count: number }[] = [];
   const inksUsed = new Set<InkT>();
+  const unresolvedByRawName = new Map<string, number>();
 
   for (const { rawName, count } of raw.cards) {
     const card = resolveCard(rawName, index, dotggIndex);
@@ -272,7 +275,30 @@ function projectDeck(
       for (const ink of card.inks) inksUsed.add(ink);
     } else {
       report.noteCard(sourceName, rawName, false);
+      unresolvedByRawName.set(rawName, (unresolvedByRawName.get(rawName) ?? 0) + 1);
     }
+  }
+
+  if (unresolvedByRawName.size > 0) {
+    let total = 0;
+    for (const v of unresolvedByRawName.values()) total += v;
+    report.noteAffectedDeck({
+      sourceName,
+      tournament: {
+        name: rawTournament.name,
+        url: rawTournament.sourceUrl,
+        date: rawTournament.date,
+      },
+      deck: {
+        externalId: raw.externalId ?? null,
+        url: raw.externalUrl ?? null,
+        displayName: raw.displayName ?? null,
+        player: raw.player ?? null,
+        placement: raw.placement ?? null,
+      },
+      unresolvedByRawName: Object.fromEntries(unresolvedByRawName),
+      unresolvedTotal: total,
+    });
   }
 
   if (resolvedCards.length === 0) return null;
@@ -291,8 +317,9 @@ function projectDeck(
   const deck: DeckT = {
     inks: inks as DeckT["inks"],
     cards,
-    name: null,
-    source: sourceName,
+    name: raw.displayName ?? null,
+    // Prefer the direct deck URL (lets reviewers click straight through).
+    source: raw.externalUrl ?? sourceName,
   };
   report.noteDeckKept(sourceName);
   return {
@@ -390,6 +417,7 @@ function writePartial(args: {
     outDir: resolve(process.cwd(), opts.outDir),
     dataset,
     report: report.build(),
+    affectedDecks: report.affectedDecks(),
   });
 }
 

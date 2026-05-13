@@ -192,6 +192,9 @@ export class LorcanaGgAdapter implements SourceAdapter {
       player: s.player_name ?? undefined,
       inks: inksFromStanding(s),
       cards,
+      externalId: s.slug,
+      externalUrl: `https://lorcana.gg/decks/${s.slug}`,
+      displayName: s.humanname ?? undefined,
     };
   }
 

@@ -24,6 +24,12 @@ export interface RawDeck {
   readonly player?: string;
   readonly inks: readonly string[];
   readonly cards: readonly { rawName: string; count: number }[];
+  /** Source-specific identifier of the deck (e.g. lorcana.gg deck slug). */
+  readonly externalId?: string;
+  /** Direct URL to the deck on the source site, for review. */
+  readonly externalUrl?: string;
+  /** Human-readable name as it appears on the source (e.g. "Amethyst Steel by EC_Lanstark"). */
+  readonly displayName?: string;
 }
 
 export interface SourceAdapter {
