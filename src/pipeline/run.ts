@@ -71,7 +71,17 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   const cards = loadCards(opts.cardsPath);
   const index = buildCardIndex(cards.cards);
 
-  const prior = opts.priorPath ? loadDataset(opts.priorPath) : null;
+  // Resume: if `--prior` wasn't given but `<outDir>/dataset.json` exists,
+  // pick it up automatically. This makes re-running the same command after
+  // an interrupted run cheap (skip everything we already have).
+  const autoPriorPath = resolve(process.cwd(), opts.outDir, "dataset.json");
+  const effectivePrior = opts.priorPath ?? (existsSync(autoPriorPath) ? autoPriorPath : null);
+  const prior = effectivePrior ? loadDataset(effectivePrior) : null;
+  if (prior && !opts.priorPath) {
+    process.stderr.write(
+      `[resume] picked up ${prior.tournaments.length} tournaments from ${autoPriorPath}\n`,
+    );
+  }
   const priorKeys = new Set((prior?.tournaments ?? []).map(tournamentKeyOf));
   const priorSeen = (k: string): boolean => priorKeys.has(k);
 
@@ -85,6 +95,24 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   const report = new ReportBuilder();
   const progress = new ProgressReporter(resolve(process.cwd(), opts.outDir));
   const added: TournamentT[] = [];
+
+  // Best-effort: on SIGINT/SIGTERM, snapshot whatever we have before exit
+  // so the next run can resume from `<outDir>/dataset.json`.
+  let interrupted = false;
+  const onSignal = (sig: NodeJS.Signals): void => {
+    if (interrupted) return; // double-Ctrl-C → let default handler kill us
+    interrupted = true;
+    process.stderr.write(`\n[${sig}] flushing partial dataset before exit…\n`);
+    try {
+      writePartial({ opts, cards, enabled, prior, added, report });
+      process.stderr.write(`[${sig}] saved ${added.length} new tournaments to ${opts.outDir}\n`);
+    } catch (err) {
+      process.stderr.write(`[${sig}] failed to flush: ${(err as Error).message}\n`);
+    }
+    process.exit(130);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
 
   for (const adapter of enabled) {
     report.startSource(adapter.sourceName);
@@ -110,7 +138,10 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       typeof opts.maxTournaments === "number" ? refs.slice(0, opts.maxTournaments) : refs;
     progress.setTournamentsTotal(limited.length);
 
-    const persistEvery = opts.persistEvery ?? 10;
+    // Default to persisting after every tournament so a crash/SIGINT mid-run
+    // loses at most one tournament's work. Override with --persist-every if
+    // disk write overhead matters more than crash safety.
+    const persistEvery = opts.persistEvery ?? 1;
     let i = 0;
     for (const ref of limited) {
       i++;

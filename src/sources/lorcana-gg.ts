@@ -124,24 +124,23 @@ export class LorcanaGgAdapter implements SourceAdapter {
     for (let page = 1; page <= maxPages; page++) {
       const summaries = await this.fetchTournamentsPage(page);
       if (summaries.length === 0) break;
-      let stopEarly = false;
       for (const s of summaries) {
-        const key = tournamentKey(this.sourceName, s.slug);
-        if (this.opts.priorSeen?.(key)) {
-          stopEarly = true;
-          continue;
-        }
+        const url = tournamentUrl(s.slug);
+        // Dedup key matches `mergeTournaments`' `tournamentKeyOf`
+        // (sourceName + sourceUrl) so a re-run with `--prior` skips
+        // tournaments already in the prior dataset.
+        const key = `${this.sourceName}:${url}`;
+        if (this.opts.priorSeen?.(key)) continue;
         const players = Number.parseInt(s.players_count ?? "0", 10);
         if (Number.isFinite(players) && players < minPlayers) continue;
         refs.push({
           tournamentKey: key,
-          sourceUrl: tournamentUrl(s.slug),
+          sourceUrl: url,
           name: s.name,
           date: toIsoDate(s.date),
         });
         if (refs.length >= maxResults) return refs;
       }
-      if (stopEarly) break;
     }
     return refs;
   }
