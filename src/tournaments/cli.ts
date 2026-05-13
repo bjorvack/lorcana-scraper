@@ -35,6 +35,7 @@ interface Args {
   minPlayers: number | undefined;
   maxDecksPerTournament: number | undefined;
   persistEvery: number | undefined;
+  requestSpacingMs: number | undefined;
   datasetVersion: string;
 }
 
@@ -51,6 +52,7 @@ function parseArgs(argv: string[]): Args {
     minPlayers: undefined,
     maxDecksPerTournament: undefined,
     persistEvery: undefined,
+    requestSpacingMs: undefined,
     datasetVersion: "1.0.0",
   };
   for (let i = 0; i < argv.length; i++) {
@@ -97,6 +99,9 @@ function parseArgs(argv: string[]): Args {
       case "--persist-every":
         a.persistEvery = Number.parseInt(v(), 10);
         break;
+      case "--rate-limit-ms":
+        a.requestSpacingMs = Number.parseInt(v(), 10);
+        break;
       case "--dataset-version":
         a.datasetVersion = v();
         break;
@@ -134,6 +139,7 @@ function printUsage(): void {
       "  --min-players <n>          Skip tournaments below this player count",
       "  --max-decks-per-tournament <n>  Only fetch top-N decks per tournament",
       "  --persist-every <n>        Snapshot outputs every N tournaments (default: 1)",
+      "  --rate-limit-ms <ms>       Min ms between API requests (default: 750)",
       "  --dataset-version <s>      Semver (default: 1.0.0)",
       "  -h, --help                 Show this help",
       "",
@@ -179,6 +185,7 @@ export async function runTournamentsCli(argv = process.argv.slice(2)): Promise<v
       minPlayers: args.minPlayers,
       maxDecksPerTournament: args.maxDecksPerTournament,
       persistEvery: args.persistEvery,
+      requestSpacingMs: args.requestSpacingMs,
       datasetMeta: {
         datasetVersion: args.datasetVersion,
         schemaVersion: SCHEMA_VERSION,

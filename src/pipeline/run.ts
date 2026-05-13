@@ -55,8 +55,10 @@ export interface RunOptions {
   readonly minPlayers?: number;
   /** Only fetch the top-N decks per tournament. Default: unlimited. */
   readonly maxDecksPerTournament?: number;
-  /** Persist progress to `outDir` after every N tournaments. Default: 10. */
+  /** Persist progress to `outDir` after every N tournaments. Default: 1. */
   readonly persistEvery?: number;
+  /** Override the source's default request spacing (ms). Lower = faster. */
+  readonly requestSpacingMs?: number;
   /** Dataset metadata. */
   readonly datasetMeta: {
     readonly datasetVersion: string; // semver
@@ -148,6 +150,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       maxResults: opts.maxTournaments,
       minPlayers: opts.minPlayers,
       maxDecksPerTournament: opts.maxDecksPerTournament,
+      requestSpacingMs: opts.requestSpacingMs,
       onDeckFetched: (a) => progress.noteDeck(a),
       onTournamentStart: (a) => progress.setCurrentTournamentDeckCount(a.deckCount),
     });
@@ -338,6 +341,7 @@ function applyAdapterOptions(
     maxResults?: number;
     minPlayers?: number;
     maxDecksPerTournament?: number;
+    requestSpacingMs?: number;
     onDeckFetched?: (a: { resolved: boolean; failed: boolean }) => void;
     onTournamentStart?: (a: { deckCount: number }) => void;
   },
@@ -350,6 +354,7 @@ function applyAdapterOptions(
       maxResults: opts.maxResults,
       minPlayers: opts.minPlayers,
       maxDecksPerTournament: opts.maxDecksPerTournament,
+      requestSpacingMs: opts.requestSpacingMs,
       onDeckFetched: opts.onDeckFetched,
       onTournamentStart: opts.onTournamentStart,
     });

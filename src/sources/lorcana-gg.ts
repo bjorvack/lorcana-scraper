@@ -21,13 +21,25 @@ import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./typ
 const BASE = "https://api.dotgg.gg/cgfw";
 const PER_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_ATTEMPTS = 3;
+
 /**
- * `api.dotgg.gg` is fronted by Cloudflare with an aggressive request-rate
- * rule. Empirically 4 RPS sustained from one IP triggers a 1015 ratelimit
- * (`retry-after` measured in minutes). 1.1 s/req puts us comfortably under
- * the threshold and keeps a 1.1k-deck backfill at ≈20 min of wall-clock.
+ * Default request spacing in ms. The rate limiter is a leaky bucket: the
+ * next request returns after `requestSpacingMs` since the previous request
+ * was issued, regardless of how many workers call it concurrently.
+ *
+ * Empirical Cloudflare 1015 thresholds on `api.dotgg.gg`:
+ *   - 250 ms (4 RPS)  → trips within seconds
+ *   - 500 ms (2 RPS)  → trips after ~50 s
+ *   - 750 ms (1.3 RPS) → stable in our tests
+ *   - 1100 ms (0.9 RPS) → comfortable, used by the prior long-running backfill
+ *
+ * We default to 750 ms, which is ~30 % faster than 1100 ms while still
+ * leaving headroom for the listing+detail+deck request mix. The
+ * `--rate-limit-ms` CLI flag lets a caller go faster or slower.
  */
-const MIN_GAP_MS = 1100;
+const DEFAULT_REQUEST_SPACING_MS = 750;
+const JITTER_RATIO = 0.15;
+
 /**
  * If the server tells us to wait longer than this on a 429, we bail and
  * let the orchestrator resume on a future run rather than block CI for
@@ -35,6 +47,36 @@ const MIN_GAP_MS = 1100;
  */
 const MAX_RETRY_AFTER_MS = 60_000;
 const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
+
+/**
+ * Leaky-bucket rate limiter: every `acquire()` returns after the bucket has
+ * "filled" enough since the previous acquire. N parallel callers all share
+ * the same `nextSlot` so the average rate is exactly `1000/intervalMs` RPS
+ * regardless of concurrency.
+ */
+class RateLimiter {
+  private nextSlot = 0;
+  constructor(
+    private intervalMs: number,
+    private jitterRatio = JITTER_RATIO,
+  ) {}
+  async acquire(): Promise<void> {
+    const now = Date.now();
+    const wait = Math.max(0, this.nextSlot - now);
+    // Jitter prevents N workers issuing in lock-step bursts after every
+    // acquire() returns simultaneously.
+    const jitter = this.intervalMs * this.jitterRatio * (Math.random() * 2 - 1);
+    this.nextSlot = Math.max(now, this.nextSlot) + this.intervalMs + jitter;
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  }
+  /** Push the next slot back (after a 429). */
+  penalise(extraMs: number): void {
+    this.nextSlot = Math.max(this.nextSlot, Date.now()) + extraMs;
+  }
+  get intervalMillis(): number {
+    return this.intervalMs;
+  }
+}
 
 export interface LorcanaGgOptions {
   /** Hard cap on pagination. Default 200 (~6000 tournaments). */
@@ -63,6 +105,12 @@ export interface LorcanaGgOptions {
   readonly onDeckFetched?: (args: { resolved: boolean; failed: boolean }) => void;
   /** Optional callback fired right before deck fetches start. */
   readonly onTournamentStart?: (args: { deckCount: number }) => void;
+  /**
+   * Spacing between issued requests in ms. Lower = faster, but Cloudflare
+   * 1015 trips around 4+ RPS. Default 500 ms (= 2 RPS). Concurrent fetches
+   * share the same bucket so this is sustained, not per-worker.
+   */
+  readonly requestSpacingMs?: number;
 }
 
 interface TournamentSummary {
@@ -112,9 +160,11 @@ interface DeckDetail {
 export class LorcanaGgAdapter implements SourceAdapter {
   readonly sourceName = "lorcana.gg";
 
-  private lastRequestAt = 0;
+  private readonly rateLimiter: RateLimiter;
 
-  constructor(private readonly opts: LorcanaGgOptions = {}) {}
+  constructor(private readonly opts: LorcanaGgOptions = {}) {
+    this.rateLimiter = new RateLimiter(opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS);
+  }
 
   async listTournaments(): Promise<TournamentRef[]> {
     const maxPages = this.opts.maxPages ?? 200;
@@ -148,7 +198,10 @@ export class LorcanaGgAdapter implements SourceAdapter {
   async fetchTournament(ref: TournamentRef): Promise<RawTournament> {
     const slug = slugFromUrl(ref.sourceUrl);
     const detail = await this.fetchTournamentDetail(slug);
-    const concurrency = this.opts.deckConcurrency ?? 1;
+    // With a shared rate limiter the effective RPS is constant regardless
+    // of concurrency, so we can safely run 4 workers in parallel. That
+    // pipelines JSON parsing while the next request is in flight.
+    const concurrency = this.opts.deckConcurrency ?? 4;
     let standings = detail.standings.filter((s) => typeof s.slug === "string" && s.slug);
     // Top-N by placement (1 is the best, missing places sort last).
     standings.sort(
@@ -222,7 +275,7 @@ export class LorcanaGgAdapter implements SourceAdapter {
   private async getJson<T>(url: string, fallback?: T): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      await this.respectMinGap();
+      await this.rateLimiter.acquire();
       try {
         const res = await timedFetch(url);
         if (res.status === 429) {
@@ -232,6 +285,9 @@ export class LorcanaGgAdapter implements SourceAdapter {
               `${url}: HTTP 429 with retry-after=${retryAfterMs / 1000}s — refusing to wait`,
             );
           }
+          // Push every other in-flight worker out by retryAfter as well — they
+          // were issued at roughly the same rate so they'd all 429 in a row.
+          this.rateLimiter.penalise(Math.max(retryAfterMs, backoff(attempt)));
           await sleep(Math.max(retryAfterMs, backoff(attempt)));
           continue;
         }
@@ -253,12 +309,6 @@ export class LorcanaGgAdapter implements SourceAdapter {
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error(`Failed to fetch ${url}`);
-  }
-
-  private async respectMinGap(): Promise<void> {
-    const wait = MIN_GAP_MS - (Date.now() - this.lastRequestAt);
-    if (wait > 0) await sleep(wait);
-    this.lastRequestAt = Date.now();
   }
 }
 
