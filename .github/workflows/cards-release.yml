@@ -1,0 +1,12 @@
+name: cards-release
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+# TODO: publish cards-vN release on merge of a cards/* PR.
+jobs:
+  noop:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo stub

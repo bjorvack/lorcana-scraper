@@ -1,0 +1,43 @@
+{
+  "name": "@bjorvack/lorcana-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cards + tournaments scraper for the Lorcana deckbuilder pipeline.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "lorcana-scrape": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "scrape": "tsx src/index.ts",
+    "scrape:cards": "tsx src/cards/run.ts",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@bjorvack/lorcana-schemas": "^0.1.0",
+    "cheerio": "^1.0.0",
+    "pino": "^9.4.0",
+    "playwright": "^1.47.0",
+    "undici": "^6.19.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "eslint": "^9.9.0",
+    "prettier": "^3.3.0",
+    "tsup": "^8.2.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "playwright", "@playwright/browser-chromium"]
+  }
+}

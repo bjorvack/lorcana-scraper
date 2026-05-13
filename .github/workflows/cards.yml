@@ -1,0 +1,11 @@
+name: cards
+on:
+  schedule:
+    - cron: "0 4 1 * *"
+  workflow_dispatch:
+# TODO: implement per DESIGN.md → "Card snapshot pipeline".
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "cards.yml stub"

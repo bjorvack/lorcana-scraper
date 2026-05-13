@@ -1,0 +1,10 @@
+node_modules
+dist
+cache
+out
+prior
+coverage
+.DS_Store
+*.log
+.idea
+.vscode
