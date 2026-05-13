@@ -1,14 +1,15 @@
 name: scrape
 
-# Scheduled tournaments-vN refresh.
+# Scheduled tournaments-vN refresh, sharded.
 #
-# Runs every 6 hours (DESIGN.md "scrape.yml — scheduled run"). Resumes
-# from the latest tournaments-vN release if one exists, fetches anything
-# new from lorcana.gg, validates, and publishes a new release when
-# content actually changed.
+# The listing endpoint has ~57 pages of tournaments. To split the
+# Cloudflare 1015 rate-limit budget across multiple egress IPs, we run
+# N parallel shards (each on its own GitHub Actions runner) that scrape
+# disjoint page ranges. A final `merge` job combines the shard outputs
+# into a single dataset, validates, and publishes the release.
 #
-# The pipeline writes progress.json continuously; on GitHub Actions
-# progress.json is uploaded as a workflow artifact for debugging.
+# Resume / dedup is handled by each shard passing the latest
+# tournaments-vN as `--prior` so already-known tournaments are skipped.
 
 on:
   schedule:
@@ -20,7 +21,7 @@ on:
         type: boolean
         default: false
       max_tournaments:
-        description: "Cap tournaments per run (debug)"
+        description: "Cap tournaments per shard (debug)"
         type: string
         default: ""
 
@@ -29,27 +30,14 @@ permissions:
   packages: read
 
 jobs:
-  scrape:
+  prepare:
     runs-on: ubuntu-latest
-    # The CI runner ships a 6h max. A full backfill is ~4h; an incremental
-    # run is minutes. We set a generous-but-bounded timeout so a wedged
-    # run doesn't hold the queue.
-    timeout-minutes: 350
+    outputs:
+      cards_tag: ${{ steps.cards.outputs.tag }}
+      prior_tag: ${{ steps.prior.outputs.tag }}
+      have_prior: ${{ steps.prior.outputs.have_prior }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          registry-url: https://npm.pkg.github.com
-          scope: "@bjorvack"
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Resolve pinned cards-vN
         id: cards
         env:
@@ -63,7 +51,6 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           mkdir -p cards
           gh release download "$tag" --repo bjorvack/lorcana-scraper -p cards.json -D cards
-
       - name: Download latest tournaments-vN (prior)
         id: prior
         env:
@@ -81,23 +68,129 @@ jobs:
           else
             echo "have_prior=0" >> "$GITHUB_OUTPUT"
           fi
+      - name: Upload cards + prior
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-inputs
+          path: |
+            cards/cards.json
+            prior/dataset.json
+          if-no-files-found: ignore
+          retention-days: 1
 
-      - name: Run pipeline
-        id: scrape
+  scrape:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      # Total shards and the listing page range each shard owns. Keep
+      # PAGES_PER_SHARD * TOTAL_SHARDS >= real page count (~60) or the
+      # tail shard will miss pages.
+      TOTAL_SHARDS: 4
+      PAGES_PER_SHARD: 16
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Restore http cache
+        uses: actions/cache@v4
+        with:
+          path: out/http-cache
+          # Per-shard cache key so shards don't clobber each other.
+          key: http-cache-shard-${{ matrix.shard }}-${{ needs.prepare.outputs.prior_tag }}
+          restore-keys: |
+            http-cache-shard-${{ matrix.shard }}-
+
+      - name: Compute page range
+        id: range
+        run: |
+          from=$(( ${{ matrix.shard }} * PAGES_PER_SHARD + 1 ))
+          to=$(( from + PAGES_PER_SHARD - 1 ))
+          echo "from=$from" >> "$GITHUB_OUTPUT"
+          echo "to=$to"     >> "$GITHUB_OUTPUT"
+          echo "shard ${{ matrix.shard }}: pages $from..$to"
+
+      - name: Run pipeline (shard ${{ matrix.shard }})
         run: |
           args=()
           [ -n "${{ inputs.max_tournaments }}" ] && args+=("--max-tournaments" "${{ inputs.max_tournaments }}")
-          if [ "${{ steps.prior.outputs.have_prior }}" = "1" ]; then
+          if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
             args+=("--prior" "./prior/dataset.json")
           fi
           pnpm scrape:tournaments \
             --cards ./cards/cards.json \
-            --cards-release-tag "${{ steps.cards.outputs.tag }}" \
+            --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --page-from ${{ steps.range.outputs.from }} \
+            --page-to   ${{ steps.range.outputs.to }} \
             --max-decks-per-tournament 16 \
             --persist-every 5 \
             --out ./out "${args[@]}"
 
-      - name: Validate
+      - name: Upload shard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: out/
+          retention-days: 7
+
+  merge:
+    needs: [prepare, scrape]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards/
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Merge shards
+        run: |
+          shards=(shards/*/dataset.json)
+          echo "merging ${#shards[@]} shard(s): ${shards[*]}"
+          pnpm tournaments:merge-shards \
+            --out ./out \
+            --dataset-version 1.0.0 \
+            "${shards[@]}"
+
+      - name: Validate merged dataset
         run: |
           pnpm tournaments:validate \
             --dataset ./out/dataset.json \
@@ -108,14 +201,14 @@ jobs:
         id: changed
         run: |
           if [ -f ./prior/dataset.json ]; then
-            prior_hash=$(jq -r '.tournaments | length' ./prior/dataset.json)
+            prior_n=$(jq '.tournaments | length' ./prior/dataset.json)
           else
-            prior_hash=0
+            prior_n=0
           fi
-          new_count=$(jq '.tournaments | length' ./out/dataset.json)
-          echo "prior=$prior_hash" >> "$GITHUB_OUTPUT"
-          echo "new=$new_count"   >> "$GITHUB_OUTPUT"
-          if [ "$new_count" -gt "$prior_hash" ]; then
+          new_n=$(jq '.tournaments | length' ./out/dataset.json)
+          echo "prior=$prior_n" >> "$GITHUB_OUTPUT"
+          echo "new=$new_n"     >> "$GITHUB_OUTPUT"
+          if [ "$new_n" -gt "$prior_n" ]; then
             echo "changed=1" >> "$GITHUB_OUTPUT"
           else
             echo "changed=0" >> "$GITHUB_OUTPUT"
@@ -127,7 +220,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # bump minor on each scheduled publish (start at 1.0.0 if none)
           last=$(gh release list \
             --repo bjorvack/lorcana-scraper \
             --limit 50 --json tagName -q '.[].tagName' \
@@ -141,7 +233,7 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifacts (always)
+      - name: Upload merged artifacts (always)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.tagname.outputs.tag || format('scrape-{0}', github.run_id) }}
@@ -165,7 +257,7 @@ jobs:
             echo "Decks: **$n_decks**"
             echo "Resolution failure rate: $rate"
             echo
-            echo "Pinned cards snapshot: \`${{ steps.cards.outputs.tag }}\`"
+            echo "Pinned cards snapshot: \`${{ needs.prepare.outputs.cards_tag }}\`"
             echo "\`cardSetVersion\`: \`$card_set_v\`"
             echo
             echo "See \`resolution-report.json\` (attached) for per-source stats."

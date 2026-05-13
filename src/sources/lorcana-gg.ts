@@ -103,6 +103,14 @@ class RateLimiter {
 export interface LorcanaGgOptions {
   /** Hard cap on pagination. Default 200 (~6000 tournaments). */
   readonly maxPages?: number;
+  /**
+   * Sharding: only list pages in the closed range [pageFrom, pageTo]. Used
+   * by CI matrix jobs to split the ~57 listing pages across N runners so
+   * each gets its own Cloudflare rate-limit budget. Defaults to [1,
+   * maxPages].
+   */
+  readonly pageFrom?: number;
+  readonly pageTo?: number;
   /** Maximum simultaneous deck fetches per tournament. Default 3. */
   readonly deckConcurrency?: number;
   /**
@@ -206,8 +214,10 @@ export class LorcanaGgAdapter implements SourceAdapter {
     const maxPages = this.opts.maxPages ?? 200;
     const maxResults = this.opts.maxResults ?? Number.POSITIVE_INFINITY;
     const minPlayers = this.opts.minPlayers ?? 0;
+    const pageFrom = Math.max(1, this.opts.pageFrom ?? 1);
+    const pageTo = Math.min(maxPages, this.opts.pageTo ?? maxPages);
     const refs: TournamentRef[] = [];
-    for (let page = 1; page <= maxPages; page++) {
+    for (let page = pageFrom; page <= pageTo; page++) {
       const summaries = await this.fetchTournamentsPage(page);
       if (summaries.length === 0) break;
       for (const s of summaries) {

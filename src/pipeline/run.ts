@@ -47,6 +47,10 @@ export interface RunOptions {
   readonly sources: readonly string[] | null;
   /** Max pages to walk per source. Default: per-adapter default. */
   readonly maxPages?: number;
+  /** Shard: lowest listing page to consider (1-based, inclusive). */
+  readonly pageFrom?: number;
+  /** Shard: highest listing page to consider (inclusive). */
+  readonly pageTo?: number;
   /** Max tournaments per source per run (top of pagination). Default: unlimited. */
   readonly maxTournaments?: number;
   /** Concurrency for deck fetches inside each tournament. Default: 1 (rate-limit-friendly). */
@@ -146,6 +150,8 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     const ad = applyAdapterOptions(adapter, {
       priorSeen,
       maxPages: opts.maxPages,
+      pageFrom: opts.pageFrom,
+      pageTo: opts.pageTo,
       deckConcurrency: opts.deckConcurrency,
       maxResults: opts.maxTournaments,
       minPlayers: opts.minPlayers,
@@ -348,6 +354,8 @@ function applyAdapterOptions(
   opts: {
     priorSeen?: (k: string) => boolean;
     maxPages?: number;
+    pageFrom?: number;
+    pageTo?: number;
     deckConcurrency?: number;
     maxResults?: number;
     minPlayers?: number;
@@ -362,6 +370,8 @@ function applyAdapterOptions(
     return new LorcanaGgAdapter({
       priorSeen: opts.priorSeen,
       maxPages: opts.maxPages,
+      pageFrom: opts.pageFrom,
+      pageTo: opts.pageTo,
       deckConcurrency: opts.deckConcurrency,
       maxResults: opts.maxResults,
       minPlayers: opts.minPlayers,
