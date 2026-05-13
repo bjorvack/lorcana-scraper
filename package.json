@@ -32,12 +32,11 @@
     "tsup": "^8.2.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",
+    "typescript-eslint": "^8.59.0",
     "vitest": "^2.0.0"
   },
   "engines": {
     "node": ">=20"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "playwright", "@playwright/browser-chromium"]
-  }
+  "packageManager": "pnpm@10.15.1"
 }

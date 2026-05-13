@@ -1,0 +1,4 @@
+onlyBuiltDependencies:
+  - esbuild
+  - "@esbuild/darwin-arm64"
+  - "@esbuild/linux-x64"
