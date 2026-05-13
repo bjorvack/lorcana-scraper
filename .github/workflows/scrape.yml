@@ -146,15 +146,26 @@ jobs:
             --persist-every 5 \
             --out ./out "${args[@]}"
 
+      # `if: always()` — the pipeline persists dataset.json every 5
+      # tournaments, so even a shard that dies from a Cloudflare 1015
+      # rate-limit exhaustion still has useful partial data on disk.
+      # Always ship it; the merge job will stitch together whatever
+      # made it through.
       - name: Upload shard artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
           path: out/
           retention-days: 7
+          if-no-files-found: ignore
 
   merge:
+    # Run even if some shards failed — we still want to publish whatever
+    # partial data made it through. `prepare` is non-negotiable though
+    # (without cards.json + prior we have nothing to merge against).
     needs: [prepare, scrape]
+    if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -183,8 +194,15 @@ jobs:
 
       - name: Merge shards
         run: |
+          # nullglob: if no shard produced a dataset.json, the array is empty
+          # instead of containing the literal glob pattern.
+          shopt -s nullglob
           shards=(shards/*/dataset.json)
-          echo "merging ${#shards[@]} shard(s): ${shards[*]}"
+          echo "merging ${#shards[@]} shard(s): ${shards[*]:-<none>}"
+          if [ ${#shards[@]} -eq 0 ]; then
+            echo "::error::No shard produced a dataset.json — nothing to merge."
+            exit 1
+          fi
           pnpm tournaments:merge-shards \
             --out ./out \
             --dataset-version 1.0.0 \
