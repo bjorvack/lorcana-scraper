@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@bjorvack/lorcana-schemas':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.4.0
+        version: 0.4.0
       cheerio:
         specifier: ^1.0.0
         version: 1.2.0
@@ -54,8 +54,8 @@ importers:
 
 packages:
 
-  '@bjorvack/lorcana-schemas@0.1.0':
-    resolution: {integrity: sha512-L02qXDt33ur6KtYzzJEdngk30+/lCSkvQDo7yyNddhl4d6hALMX3njkWnei5Z/yXdtOe0T0vUhUP7C6eDCeq4A==, tarball: https://npm.pkg.github.com/download/@bjorvack/lorcana-schemas/0.1.0/9de83c1c4e3fc4fbb5a70e9355186ea96579079d}
+  '@bjorvack/lorcana-schemas@0.4.0':
+    resolution: {integrity: sha512-cxKHm9IdH/VMp/KXUXhCNQXMqZdduiZGldBP1It4rNQ/XojgNpMZIysG1rhOqD1MteIJ/3FyhgzFYZZrhCu2fA==, tarball: https://npm.pkg.github.com/download/@bjorvack/lorcana-schemas/0.4.0/6b857208b8bb1a49e28123f188046d5a25627ef5}
     engines: {node: '>=20'}
 
   '@esbuild/aix-ppc64@0.21.5':
@@ -1454,7 +1454,7 @@ packages:
 
 snapshots:
 
-  '@bjorvack/lorcana-schemas@0.1.0':
+  '@bjorvack/lorcana-schemas@0.4.0':
     dependencies:
       zod: 3.25.76
 

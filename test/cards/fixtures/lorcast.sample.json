@@ -1,0 +1,44 @@
+[
+  {
+    "id": "crd_aaa",
+    "name": "Ariel",
+    "version": "On Human Legs",
+    "set": { "code": "1" },
+    "collector_number": "1",
+    "cost": 4,
+    "inkwell": true,
+    "ink": "Amber",
+    "type": ["Character"],
+    "classifications": ["Storyborn", "Hero", "Princess"],
+    "text": "VOICELESS",
+    "keywords": [],
+    "image_uris": {
+      "digital": { "normal": "https://example.com/aaa.png" }
+    },
+    "legalities": { "core": "legal" },
+    "lore": 2,
+    "strength": 3,
+    "willpower": 4
+  },
+  {
+    "id": "crd_bbb",
+    "name": "Stitch",
+    "version": "Carefree Surfer",
+    "set": { "code": "1" },
+    "collector_number": "182",
+    "cost": 3,
+    "inkwell": true,
+    "ink": "Emerald",
+    "type": ["Character"],
+    "classifications": ["Storyborn", "Hero", "Alien"],
+    "text": "",
+    "keywords": [],
+    "image_uris": {
+      "digital": { "normal": "https://example.com/bbb.png" }
+    },
+    "legalities": { "core": "legal" },
+    "lore": 1,
+    "strength": 3,
+    "willpower": 4
+  }
+]
