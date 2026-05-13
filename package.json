@@ -14,6 +14,7 @@
     "scrape:cards": "tsx src/cards/run.ts",
     "scrape:tournaments": "tsx src/tournaments/cli.ts",
     "tournaments:validate": "tsx src/tournaments/validate.ts",
+    "tournaments:unresolved": "tsx src/tournaments/unresolved.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
