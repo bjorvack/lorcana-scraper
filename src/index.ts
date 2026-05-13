@@ -4,11 +4,11 @@
  * TODO: parse args, build ScrapeContext, run the tournaments pipeline.
  * See DESIGN.md → "High-level flow".
  */
-async function main(): Promise<void> {
+export async function runScrapeCli(): Promise<void> {
   throw new Error("lorcana-scraper: not yet implemented");
 }
 
-main().catch((err) => {
+runScrapeCli().catch((err) => {
   console.error(err);
   process.exit(1);
 });

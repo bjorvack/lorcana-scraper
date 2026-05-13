@@ -1,9 +1,9 @@
 /** CLI entry for the cards snapshot pipeline. TODO: implement. */
-async function main(): Promise<void> {
+export async function runCardsCli(): Promise<void> {
   throw new Error("cards pipeline: not yet implemented");
 }
 
-main().catch((err) => {
+runCardsCli().catch((err) => {
   console.error(err);
   process.exit(1);
 });
