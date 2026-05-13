@@ -1,11 +1,178 @@
 name: scrape
+
+# Scheduled tournaments-vN refresh.
+#
+# Runs every 6 hours (DESIGN.md "scrape.yml — scheduled run"). Resumes
+# from the latest tournaments-vN release if one exists, fetches anything
+# new from lorcana.gg, validates, and publishes a new release when
+# content actually changed.
+#
+# The pipeline writes progress.json continuously; on GitHub Actions
+# progress.json is uploaded as a workflow artifact for debugging.
+
 on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
-# TODO: implement per DESIGN.md → "scrape.yml — scheduled run".
+    inputs:
+      force_publish:
+        description: "Publish even if no new tournaments"
+        type: boolean
+        default: false
+      max_tournaments:
+        description: "Cap tournaments per run (debug)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  packages: read
+
 jobs:
-  noop:
+  scrape:
     runs-on: ubuntu-latest
+    # The CI runner ships a 6h max. A full backfill is ~4h; an incremental
+    # run is minutes. We set a generous-but-bounded timeout so a wedged
+    # run doesn't hold the queue.
+    timeout-minutes: 350
     steps:
-      - run: echo "scrape.yml stub"
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve pinned cards-vN
+        id: cards
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(gh release list \
+            --repo bjorvack/lorcana-scraper \
+            --limit 50 --json tagName -q '.[].tagName' \
+            | grep -E '^cards-v' | head -n 1)
+          [ -n "$tag" ] || { echo "No cards-vN release found"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          mkdir -p cards
+          gh release download "$tag" --repo bjorvack/lorcana-scraper -p cards.json -D cards
+
+      - name: Download latest tournaments-vN (prior)
+        id: prior
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p prior
+          tag=$(gh release list \
+            --repo bjorvack/lorcana-scraper \
+            --limit 50 --json tagName -q '.[].tagName' \
+            | grep -E '^tournaments-v' | head -n 1 || true)
+          if [ -n "$tag" ]; then
+            gh release download "$tag" --repo bjorvack/lorcana-scraper -p dataset.json -D prior
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "have_prior=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_prior=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run pipeline
+        id: scrape
+        run: |
+          args=()
+          [ -n "${{ inputs.max_tournaments }}" ] && args+=("--max-tournaments" "${{ inputs.max_tournaments }}")
+          if [ "${{ steps.prior.outputs.have_prior }}" = "1" ]; then
+            args+=("--prior" "./prior/dataset.json")
+          fi
+          pnpm scrape:tournaments \
+            --cards ./cards/cards.json \
+            --cards-release-tag "${{ steps.cards.outputs.tag }}" \
+            --max-decks-per-tournament 16 \
+            --persist-every 5 \
+            --out ./out "${args[@]}"
+
+      - name: Validate
+        run: |
+          pnpm tournaments:validate \
+            --dataset ./out/dataset.json \
+            --cards ./cards/cards.json \
+            --report ./out/resolution-report.json
+
+      - name: Detect changes vs prior
+        id: changed
+        run: |
+          if [ -f ./prior/dataset.json ]; then
+            prior_hash=$(jq -r '.tournaments | length' ./prior/dataset.json)
+          else
+            prior_hash=0
+          fi
+          new_count=$(jq '.tournaments | length' ./out/dataset.json)
+          echo "prior=$prior_hash" >> "$GITHUB_OUTPUT"
+          echo "new=$new_count"   >> "$GITHUB_OUTPUT"
+          if [ "$new_count" -gt "$prior_hash" ]; then
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute next tournaments-v tag
+        if: steps.changed.outputs.changed == '1' || inputs.force_publish == true
+        id: tagname
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # bump minor on each scheduled publish (start at 1.0.0 if none)
+          last=$(gh release list \
+            --repo bjorvack/lorcana-scraper \
+            --limit 50 --json tagName -q '.[].tagName' \
+            | grep -E '^tournaments-v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+          if [ -z "$last" ]; then
+            tag="tournaments-v1.0.0"
+          else
+            v=${last#tournaments-v}
+            IFS='.' read -r major minor patch <<<"$v"
+            tag="tournaments-v${major}.$((minor + 1)).0"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.tagname.outputs.tag || format('scrape-{0}', github.run_id) }}
+          path: out/
+          retention-days: 30
+
+      - name: Publish release
+        if: steps.changed.outputs.changed == '1' || inputs.force_publish == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.tagname.outputs.tag }}"
+          n_tournaments=$(jq '.tournaments | length' ./out/dataset.json)
+          n_decks=$(jq '[.tournaments[].decks | length] | add // 0' ./out/dataset.json)
+          rate=$(jq -r '(.totalFailureRate * 100) | . * 100 | floor | . / 100 | tostring + "%"' ./out/resolution-report.json)
+          card_set_v=$(jq -r .cardSetVersion ./out/dataset.json)
+          {
+            echo "## $tag"
+            echo
+            echo "Tournaments: **$n_tournaments**"
+            echo "Decks: **$n_decks**"
+            echo "Resolution failure rate: $rate"
+            echo
+            echo "Pinned cards snapshot: \`${{ steps.cards.outputs.tag }}\`"
+            echo "\`cardSetVersion\`: \`$card_set_v\`"
+            echo
+            echo "See \`resolution-report.json\` (attached) for per-source stats."
+          } > release-notes.md
+          gh release create "$tag" \
+            --title "$tag" \
+            --notes-file release-notes.md \
+            ./out/dataset.json \
+            ./out/dataset.json.sha256 \
+            ./out/resolution-report.json

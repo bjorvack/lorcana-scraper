@@ -13,6 +13,7 @@
     "scrape": "tsx src/index.ts",
     "scrape:cards": "tsx src/cards/run.ts",
     "scrape:tournaments": "tsx src/tournaments/cli.ts",
+    "tournaments:validate": "tsx src/tournaments/validate.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
