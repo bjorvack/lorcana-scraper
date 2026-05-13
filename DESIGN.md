@@ -36,8 +36,21 @@ Two design pressures shape every choice below:
    rate-limits tighten. The scraper must fail loudly and locally rather
    than silently shipping garbage downstream.
 2. **The product wants more data over time.** Today we have one source
-   (`inkdecks.com`). Tomorrow we'll want `lorcanito.com`, a Discord
-   league, etc. The architecture has to make adding a source *small*.
+   (`lorcana.gg`, backed by `api.dotgg.gg`). Tomorrow we'll want
+   community-deck repositories, Discord leagues, etc. The architecture
+   has to make adding a source *small*.
+
+> **Source-pick note.** The original draft of this doc named
+> `inkdecks.com` as the v1 source. When we sat down to implement, every
+> request to it (plain HTTP and Playwright alike) hit a Cloudflare
+> challenge. DESIGN's "no stealth plugins" rule rules it out. After
+> surveying alternatives, `lorcana.gg` (frontend) on top of
+> `api.dotgg.gg` (backend) emerged as a clean replacement: a public
+> JSON API with paginated tournament listings, per-tournament standings
+> with placement and player names, and per-deck card lists keyed by a
+> deterministic printing id (`<setCode>-<NNN>`). No Cloudflare, no auth,
+> no fuzzy name matching — resolution becomes a numeric lookup against
+> `cards-vN`.
 
 ## Non-goals
 
@@ -144,7 +157,7 @@ shared infrastructure.
 import type { TournamentT } from "@bjorvack/lorcana-schemas";
 
 export interface SourceAdapter {
-  /** Stable identifier, e.g. "inkdecks.com". */
+  /** Stable identifier, e.g. "lorcana.gg". */
   readonly sourceName: string;
 
   /** Lists tournament keys + URLs available right now. */
@@ -184,34 +197,54 @@ own fuzzy-match code.
 `src/sources/index.ts` exports an array of registered adapters. A
 `SOURCES` env var (comma-separated) selects which to run; default is all.
 
-### v1 adapters
+### v1 adapter: `lorcana.gg`
 
-- `src/sources/inkdecks.ts` — port of the existing scraper, simplified
-  and on Playwright. Sniff for `inkdecks.com/api/...` JSON endpoints
-  before falling back to HTML.
+Backed by the public `api.dotgg.gg` JSON API. Three endpoints:
 
-Future adapters (`lorcanito.com`, `dreamborn.ink`, …) are out of scope
-for v1 but the interface above is what they'll implement.
+| Endpoint | Purpose |
+|---|---|
+| `GET https://api.dotgg.gg/cgfw/gettournaments?game=lorcana&page=N` | Paginated list (~30 tournaments per page). Each item: `{ date, name, slug, organizer_name, players_count, format, winner_name, stats }`. `date` is a Unix timestamp (string). |
+| `GET https://api.dotgg.gg/cgfw/gettournament?game=lorcana&slug=<slug>` | One tournament + `standings[]` with `standing_place`, `standing_record`, `player_name`, the deck `slug`, ink-mix counters (`color_amber`, …), `archetype`, `format`. |
+| `GET https://api.dotgg.gg/cgfw/getdeck?game=lorcana&slug=<deck-slug>` | The deck itself: `deck: { "<setCode>-<NNN>": "<count>" }`. |
+
+The adapter is pure HTTP — no Playwright is required. Concurrency
+defaults to **3 simultaneous deck fetches**; each tournament's `standings`
+are walked sequentially per tournament but in parallel across tournaments
+when the run is large. Politeness floor: 250 ms minimum gap to
+`api.dotgg.gg`.
+
+Pagination strategy: start at `page=1`, increment until the response
+array is empty, capped at `MAX_PAGES` (env, default 200). Incremental
+runs stop early as soon as we see a `slug` already present in the prior
+`tournaments-vN`.
+
+Future adapters (a community Discord league, etc.) are out of scope for
+v1 but the interface above is what they'll implement.
 
 ---
 
-## Card name resolution
+## Card identity resolution
 
-The single dirtiest part of the pipeline. Source sites display cards as
-`"Mickey Mouse - Brave Little Tailor"`, sometimes `"Mickey Mouse"` (no
-version), sometimes with set codes appended, occasionally misspelled.
-Resolution lives in **one** module so the rules are visible.
+`api.dotgg.gg` returns card identifiers as `<setCode>-<NNN>` printing
+strings (e.g. `"006-049"`). These map directly onto `(setCode, cardNumber)`
+fields of the `Card` schema — no fuzzy matching, no aliases.
 
 `src/resolve/cardIndex.ts` builds, on each run, an in-memory index over
-the current Lorcast snapshot:
+the pinned `cards-vN` snapshot:
 
 ```ts
 interface CardIndex {
+  byPrinting: Map<string, CardT>;   // "006-049" → Card  (primary, deterministic)
+  // Kept for future name-string-emitting sources:
   byExact: Map<string, CardT>;          // "Mickey Mouse - Brave Little Tailor"
   byNameVersion: Map<string, CardT[]>;  // "mickey mouse" → all printings
   byNormalised: Map<string, CardT>;     // accent-stripped, lowercased, punctuation-stripped
 }
 ```
+
+For the lorcana.gg adapter only `byPrinting` is consulted. The
+name-based maps remain populated and are retained for the inevitable
+day a future source emits strings.
 
 Resolution strategy, in order:
 
@@ -394,7 +427,7 @@ auto-generated from the `resolution-report.json`:
 ## tournaments-v1.42.0
 
 Added 14 tournaments (208 decks, 12480 cards).
-Sources: inkdecks.com.
+Sources: lorcana.gg.
 
 Card resolution failure rate: 0.2% (24 / 12480).
 Top unresolved names:
@@ -478,7 +511,7 @@ lorcana-scraper/
 │   ├── sources/
 │   │   ├── types.ts
 │   │   ├── index.ts            # registry
-│   │   └── inkdecks.ts
+│   │   └── lorcana-gg.ts       # api.dotgg.gg adapter
 │   ├── resolve/
 │   │   ├── cardIndex.ts
 │   │   ├── normalise.ts
@@ -496,13 +529,14 @@ lorcana-scraper/
 │   │   └── release.ts          # cards release artifact builder
 │   └── logging.ts              # structured (pino), JSON lines
 ├── test/
-│   ├── sources/inkdecks.test.ts
+│   ├── sources/lorcana-gg.test.ts
 │   ├── resolve/cardIndex.test.ts
 │   ├── pipeline/merge.test.ts
 │   └── fixtures/
-│       ├── inkdecks/
-│       │   ├── tournament-list.html
-│       │   └── tournament-detail-001.html
+│       ├── lorcana-gg/
+│       │   ├── gettournaments.page1.json
+│       │   ├── gettournament.sample.json
+│       │   └── getdeck.sample.json
 │       ├── lorcast/cards.snapshot.json
 │       └── prior-dataset.json
 ├── cache/                      # gitignored
@@ -545,7 +579,7 @@ lorcana-scraper/
 pnpm install
 pnpm playwright install chromium
 # Run a single source against a single tournament URL, no PR, no release
-pnpm scrape:dev --source inkdecks --url https://inkdecks.com/tournaments/xyz
+pnpm scrape:dev --source lorcana-gg --slug mulligan-challenge-25
 ```
 
 `scrape:dev` runs everything except the release step, writes results to
@@ -569,7 +603,7 @@ adapter code path — only the orchestration around it differs.
 
 ## Open questions to resolve before implementing
 
-1. **Source coverage at launch.** *Decided: build the `inkdecks.com`
+1. **Source coverage at launch.** *Decided: build the `lorcana.gg`
    adapter end-to-end, do one real production run, then evaluate.* If
    that run yields enough tournaments to make a healthy v1 dataset
    (rough bar: ≥ 200 distinct tournament-decks after dedup), we ship
@@ -609,7 +643,7 @@ adapter code path — only the orchestration around it differs.
    a commit on `main`. `RELEASES.md` is the only file the PR touches.
 4. **Historical backfill.** *Decided: one-shot full backfill into
    v1.0.0.* Before the first scheduled run, a maintainer runs
-   `scrape:dev --backfill` locally against the full `inkdecks.com`
+   `scrape:dev --backfill` locally against the full `lorcana.gg`
    archive. Output is reviewed (`resolution-report.json`, a sample of
    decks eyeballed for plausibility) and committed as the
    `tournaments-v1.0.0` release. Every subsequent scheduled run is

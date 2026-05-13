@@ -1,5 +1,5 @@
 import type { SourceAdapter } from "./types.js";
-import { inkdecks } from "./inkdecks.js";
+import { lorcanaGg } from "./lorcana-gg.js";
 
-/** Adapter registry. SOURCES env (comma-separated) selects which to run. */
-export const adapters: readonly SourceAdapter[] = [inkdecks];
+/** Adapter registry. `SOURCES` env var (comma-separated) selects which to run. */
+export const adapters: readonly SourceAdapter[] = [lorcanaGg];

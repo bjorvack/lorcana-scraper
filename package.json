@@ -12,6 +12,7 @@
     "build": "tsup",
     "scrape": "tsx src/index.ts",
     "scrape:cards": "tsx src/cards/run.ts",
+    "scrape:tournaments": "tsx src/tournaments/cli.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
