@@ -97,6 +97,24 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Release tag: $tag"
 
+      - name: Build short release notes
+        if: steps.scrape.outputs.changed == '1' || inputs.force_publish == true
+        id: notes
+        run: |
+          # The full diff lives in cards-diff.md (attached). The release body
+          # is capped at 125 KB by GitHub, so we extract just the header.
+          head -n 5 ./out/cards-diff.md > ./out/release-notes.md
+          card_count=$(jq '.cards | length' ./out/cards.json)
+          version=$(jq -r .cardSetVersion ./out/cards.json)
+          {
+            echo ""
+            echo "Total cards: **${card_count}**"
+            echo ""
+            echo "\`cardSetVersion\`: \`${version}\`"
+            echo ""
+            echo "See \`cards-diff.md\` (attached) for the full per-card diff."
+          } >> ./out/release-notes.md
+
       - name: Publish cards-vN release
         if: steps.scrape.outputs.changed == '1' || inputs.force_publish == true
         env:
@@ -105,7 +123,7 @@ jobs:
           tag="${{ steps.tagname.outputs.tag }}"
           gh release create "$tag" \
             --title "$tag" \
-            --notes-file ./out/cards-diff.md \
+            --notes-file ./out/release-notes.md \
             ./out/cards.json \
             ./out/cards.json.sha256 \
             ./out/cards-diff.md
