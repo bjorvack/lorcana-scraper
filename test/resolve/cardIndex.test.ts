@@ -23,6 +23,12 @@ function card(o: Partial<CardT>): CardT {
     strength: null,
     willpower: null,
     moveCost: null,
+    setName: null,
+    collectorNumber: null,
+    rarity: null,
+    illustrators: [],
+    releasedAt: null,
+    tcgplayerId: null,
     ...o,
   };
 }

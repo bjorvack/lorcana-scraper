@@ -26,7 +26,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@bjorvack/lorcana-schemas": "^0.5.0",
+    "@bjorvack/lorcana-schemas": "^0.6.0",
     "cheerio": "^1.0.0",
     "pino": "^9.4.0",
     "playwright": "^1.47.0",
