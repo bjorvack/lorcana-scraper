@@ -136,3 +136,18 @@ jobs:
             ./out/cards-diff.md \
             ./out/banlist.json \
             ./out/rotation.json
+
+      # Notify lorcana-training that a new cards-vN landed so it can
+      # poll the scraper, open an auto-merging bump PR, and queue
+      # the next retrain — without waiting for the daily cron.
+      - name: Dispatch upstream-cards-released to lorcana-training
+        if: steps.scrape.outputs.changed == '1' || inputs.force_publish == true
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
+        run: |
+          tag="${{ steps.tagname.outputs.tag }}"
+          curl -fSs -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/bjorvack/lorcana-training/dispatches \
+            -d "{\"event_type\":\"upstream-cards-released\",\"client_payload\":{\"tag\":\"$tag\"}}"

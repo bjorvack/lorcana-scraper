@@ -286,3 +286,15 @@ jobs:
             ./out/dataset.json \
             ./out/dataset.json.sha256 \
             ./out/resolution-report.json
+
+      - name: Dispatch upstream-tournaments-released to lorcana-training
+        if: steps.changed.outputs.changed == '1' || inputs.force_publish == true
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
+        run: |
+          tag="${{ steps.tagname.outputs.tag }}"
+          curl -fSs -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/bjorvack/lorcana-training/dispatches \
+            -d "{\"event_type\":\"upstream-tournaments-released\",\"client_payload\":{\"tag\":\"$tag\"}}"
