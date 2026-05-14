@@ -107,6 +107,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install chromium for inkdecks adapter
+        run: |
+          pnpm exec playwright install chromium --with-deps || \
+            npx -y playwright@1.60 install chromium --with-deps
+
       - name: Download scrape inputs
         uses: actions/download-artifact@v4
         with:
@@ -120,6 +125,17 @@ jobs:
           key: http-cache-shard-${{ matrix.shard }}-${{ needs.prepare.outputs.prior_tag }}
           restore-keys: |
             http-cache-shard-${{ matrix.shard }}-
+
+      - name: Restore inkdecks browser state (cf_clearance cookie)
+        uses: actions/cache@v4
+        with:
+          path: .cache/inkdecks-state.json
+          # The Cloudflare clearance cookie has roughly a 30-minute
+          # TTL but we keep the storage state per shard anyway — even
+          # an expired cookie speeds up the next challenge.
+          key: inkdecks-state-shard-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            inkdecks-state-shard-${{ matrix.shard }}-
 
       - name: Compute page range
         id: range

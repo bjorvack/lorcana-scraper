@@ -23,6 +23,7 @@ import {
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter } from "../sources/types.js";
+import { InkdecksAdapter } from "../sources/inkdecks.js";
 import { LegacyCacheAdapter } from "../sources/legacy-cache.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
@@ -392,6 +393,16 @@ function applyAdapterOptions(
       priorSeen: opts.priorSeen,
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
+    });
+  }
+  if (adapter instanceof InkdecksAdapter) {
+    return new InkdecksAdapter({
+      priorSeen: opts.priorSeen,
+      pageFrom: opts.pageFrom,
+      pageTo: opts.pageTo,
+      maxPages: opts.maxPages,
+      onTournamentStart: opts.onTournamentStart,
+      onDeckFetched: opts.onDeckFetched,
     });
   }
   return adapter;

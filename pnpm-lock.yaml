@@ -20,6 +20,9 @@ importers:
       playwright:
         specifier: ^1.47.0
         version: 1.60.0
+      playwright-core:
+        specifier: ^1.60.0
+        version: 1.60.0
       undici:
         specifier: ^6.19.0
         version: 6.25.0

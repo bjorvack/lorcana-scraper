@@ -11,3 +11,4 @@ coverage
 *.log
 .idea
 .vscode
+.cache/
