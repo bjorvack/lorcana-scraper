@@ -403,6 +403,90 @@ an artifact on failure.
 
 ---
 
+## Banlist & rotation snapshot pipeline
+
+The card-level `Legality` enum is point-in-time and doesn't model the
+two things players care about in 2025+:
+
+- **Banlists** (one per format) — small, change rarely (a few times a
+  year), each entry is `(cardName, setCode, cardNumber, effectiveDate)`.
+- **Rotation** — sets roll out of Core Constructed in yearly blocks
+  starting with the Set 9 (Fabled) release. Infinity Constructed
+  doesn't rotate.
+
+Both are scraped from lorcana.gg, which aggregates Ravensburger's
+announcements into two HTML pages with stable table formats. We use
+lorcana.gg rather than Ravensburger directly because Ravensburger
+publishes bans across press-release pages with inconsistent layouts;
+lorcana.gg's curation is the de-facto community source and survives
+re-scrape with simple selector targeting.
+
+### Sources
+
+- **<https://lorcana.gg/banned-card-list/>** — one table of currently
+  banned cards plus a changelog list of effective dates. We parse the
+  current-list table; the changelog is captured for the diff log but
+  is not part of the canonical output.
+- **<https://lorcana.gg/rotation/>** — three "Year N" tables of
+  `(set, release date, rotation date)` plus prose explaining the
+  cutoff months. We parse the tables.
+
+### Commands
+
+Two new CLI entries that mirror the existing `scrape:cards` shape:
+
+```
+pnpm scrape:banlist   --out ./out
+pnpm scrape:rotation  --out ./out
+```
+
+Each emits a single JSON file (`banlist.json` / `rotation.json`)
+matching the `Banlist` / `Rotation` schemas in
+`@bjorvack/lorcana-schemas`. Both files attach to the same `cards-vN`
+release as `cards.json` — the cadence is identical (legality data
+changes with the same monthly-ish drumbeat as new card releases) and
+co-locating means downstream consumers only have to pin one tag.
+
+### Output
+
+Adds three assets to every `cards-vN` release:
+
+- `banlist.json` + `banlist.json.sha256`
+- `rotation.json` + `rotation.json.sha256`
+
+Both files validate against their schema before upload; a `cards.diff.md`
+addendum lists banlist/rotation changes vs. the prior release so the
+human review on the PR can flag a surprising delta.
+
+### Workflow
+
+`scrape.yml` already runs on a 6-hour schedule for tournaments. We add
+a separate **`legality.yml`** that runs **weekly** (Mondays at 09:00
+UTC). The looser cadence reflects how rarely either upstream changes
+— more frequent polling would just hit the cache and burn CI minutes.
+
+The workflow:
+
+1. Re-fetches both pages.
+2. Re-runs `scrape:banlist` + `scrape:rotation`.
+3. Diffs the produced JSON against the latest `cards-vN` assets.
+4. If anything changed: opens a PR titled `chore(legality): bump
+   banlist/rotation` with the diff as the body. CI on that PR
+   re-validates the JSON and surfaces any parse failures.
+5. Merging the PR triggers a fresh `cards-vN` release (same
+   `scrape:cards` flow with refreshed legality data attached).
+
+### Fallback when lorcana.gg disappears
+
+If the scraper can't reach lorcana.gg (DNS down, page restructured,
+selectors broken), the workflow fails with a structured error and the
+PR isn't opened. The last successful `banlist.json` + `rotation.json`
+stay on the latest `cards-vN` release, so deployed consumers keep
+working with stale-but-correct data. A pinned `LAST_GOOD_AS_OF` field
+inside each file makes the staleness visible to consumers.
+
+---
+
 ## Output: the `Dataset` release artifact
 
 Every successful run that produces new tournaments publishes:
