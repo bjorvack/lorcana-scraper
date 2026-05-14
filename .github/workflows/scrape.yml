@@ -137,6 +137,18 @@ jobs:
           restore-keys: |
             inkdecks-state-shard-${{ matrix.shard }}-
 
+      - name: Restore inkdecks deck-content cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/inkdecks-decks
+          # Each ``/decks/export/<uuid>/txt`` is content-addressable —
+          # a stable cookie has no bearing on what we extract — so the
+          # cache key is just the shard. Cache grows monotonically;
+          # GitHub will evict the oldest entries when it gets full.
+          key: inkdecks-decks-shard-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            inkdecks-decks-shard-${{ matrix.shard }}-
+
       - name: Compute page range
         id: range
         run: |

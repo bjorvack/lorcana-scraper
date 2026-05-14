@@ -401,6 +401,7 @@ function applyAdapterOptions(
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
       maxPages: opts.maxPages,
+      deckConcurrency: opts.deckConcurrency,
       onTournamentStart: opts.onTournamentStart,
       onDeckFetched: opts.onDeckFetched,
     });
