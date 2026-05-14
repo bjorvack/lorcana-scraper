@@ -126,6 +126,18 @@ function tournamentKey(sourceUrl: string): string {
 }
 
 /**
+ * The orchestrator partitions ``lorcana-gg``'s ~57 listing pages
+ * across N matrix shards via ``pageFrom``/``pageTo``. The legacy
+ * cache has no equivalent of "pages" — every shard would otherwise
+ * import the full 1 124 tournaments and the merge step would have
+ * to dedup four copies. Map the legacy refs into evenly-sized
+ * page-sized buckets keyed off the same range so each shard only
+ * sees its own slice. Bucket size matches lorcana-gg's per-page
+ * default (~20 listings) so the legacy load distributes similarly.
+ */
+const LEGACY_BUCKET_SIZE = 20;
+
+/**
  * Title-case an ink the legacy data emits as lowercase ("amber",
  * "amethyst"…). The downstream pipeline accepts either, but
  * normalising here keeps the dataset consistent across sources.
@@ -153,31 +165,65 @@ function projectDeck(legacy: LegacyDeck, placement: number | null): RawDeck {
   };
 }
 
-export const legacyCache: SourceAdapter = {
-  sourceName: SOURCE_NAME,
+export interface LegacyCacheAdapterOptions {
+  /**
+   * Sharding: only emit tournaments whose ``LEGACY_BUCKET_SIZE``-
+   * sized bucket falls in the closed range [pageFrom, pageTo]. Used
+   * by the orchestrator's CI matrix to distribute the legacy load
+   * across the same shards lorcana-gg uses, so each runner only
+   * imports its own slice instead of all 1 124 records.
+   */
+  readonly pageFrom?: number;
+  readonly pageTo?: number;
+  /**
+   * Mirror the lorcana-gg adapter's prior-seen short-circuit so the
+   * orchestrator's incremental-run logic still works against the
+   * static cache. Returning ``true`` from this callback drops the
+   * matching legacy ref from the listing.
+   */
+  readonly priorSeen?: (tournamentKey: string) => boolean;
+}
+
+export class LegacyCacheAdapter implements SourceAdapter {
+  readonly sourceName = SOURCE_NAME;
+  readonly #opts: LegacyCacheAdapterOptions;
+
+  constructor(opts: LegacyCacheAdapterOptions = {}) {
+    this.#opts = opts;
+  }
 
   async listTournaments(_ctx: ScrapeContext): Promise<TournamentRef[]> {
     const idx = loadCache();
+    // Deterministic ordering — date-then-url — so the bucket
+    // assignment is stable across shards (every runner sees the
+    // same numbering even when the underlying Map insertion order
+    // differs).
+    const ordered = [...idx.tournaments.values()]
+      .filter((t) => t.decks.some((d) => idx.decks.has(d.hash)))
+      .sort((a, b) =>
+        a.date === b.date ? a.url.localeCompare(b.url) : a.date.localeCompare(b.date),
+      );
+    const pageFrom = this.#opts.pageFrom ?? 1;
+    const pageTo = this.#opts.pageTo ?? Number.MAX_SAFE_INTEGER;
     const refs: TournamentRef[] = [];
-    for (const t of idx.tournaments.values()) {
-      // Skip tournaments that don't reference any cached decks. The
-      // legacy data has a handful of stubs with empty deck lists.
-      const knownDecks = t.decks.filter((d) => idx.decks.has(d.hash));
-      if (knownDecks.length === 0) continue;
+    for (let i = 0; i < ordered.length; i++) {
+      const bucket = Math.floor(i / LEGACY_BUCKET_SIZE) + 1;
+      if (bucket < pageFrom || bucket > pageTo) continue;
+      const t = ordered[i]!;
+      const key = tournamentKey(t.url);
+      if (this.#opts.priorSeen?.(key)) continue;
       refs.push({
-        tournamentKey: tournamentKey(t.url),
+        tournamentKey: key,
         sourceUrl: t.url,
         name: t.name,
         date: t.date,
       });
     }
     return refs;
-  },
+  }
 
   async fetchTournament(ref: TournamentRef, _ctx: ScrapeContext): Promise<RawTournament> {
     const idx = loadCache();
-    // Reverse-lookup the tournament record by sourceUrl since
-    // ``TournamentRef`` is the only shape the orchestrator hands us.
     let entry: LegacyTournament | undefined;
     for (const t of idx.tournaments.values()) {
       if (t.url === ref.sourceUrl) {
@@ -190,7 +236,7 @@ export const legacyCache: SourceAdapter = {
     const decks: RawDeck[] = [];
     for (const slot of entry.decks) {
       const legacy = idx.decks.get(slot.hash);
-      if (!legacy) continue; // dataset references a deck file we don't have
+      if (!legacy) continue;
       decks.push(projectDeck(legacy, slot.place));
     }
 
@@ -200,5 +246,9 @@ export const legacyCache: SourceAdapter = {
       date: entry.date,
       decks,
     };
-  },
-};
+  }
+}
+
+/** Default registry entry — no shard slicing applied. The orchestrator
+ *  wraps this with ``configureAdapter`` to pin shard options. */
+export const legacyCache: SourceAdapter = new LegacyCacheAdapter();

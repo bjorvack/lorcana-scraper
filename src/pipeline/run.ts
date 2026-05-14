@@ -23,6 +23,7 @@ import {
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter } from "../sources/types.js";
+import { LegacyCacheAdapter } from "../sources/legacy-cache.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
 import { normaliseKey } from "../resolve/normalise.js";
@@ -380,6 +381,17 @@ function applyAdapterOptions(
       cacheDir: opts.cacheDir,
       onDeckFetched: opts.onDeckFetched,
       onTournamentStart: opts.onTournamentStart,
+    });
+  }
+  if (adapter instanceof LegacyCacheAdapter) {
+    // Share the lorcana-gg shard range so the static legacy seed
+    // is partitioned across the same matrix runners. Each shard
+    // imports only its own bucket of the 1 124 tournaments instead
+    // of every shard processing the full list.
+    return new LegacyCacheAdapter({
+      priorSeen: opts.priorSeen,
+      pageFrom: opts.pageFrom,
+      pageTo: opts.pageTo,
     });
   }
   return adapter;
