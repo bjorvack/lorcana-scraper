@@ -13,6 +13,9 @@
     "scrape": "tsx src/index.ts",
     "scrape:cards": "tsx src/cards/run.ts",
     "scrape:tournaments": "tsx src/tournaments/cli.ts",
+    "scrape:banlist": "tsx src/legality/run.ts --mode banlist",
+    "scrape:rotation": "tsx src/legality/run.ts --mode rotation",
+    "scrape:legality": "tsx src/legality/run.ts --mode both",
     "tournaments:validate": "tsx src/tournaments/validate.ts",
     "tournaments:merge-shards": "tsx src/tournaments/merge-shards.ts",
     "tournaments:promote": "tsx src/tournaments/promote.ts",
@@ -23,7 +26,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@bjorvack/lorcana-schemas": "^0.4.0",
+    "@bjorvack/lorcana-schemas": "^0.5.0",
     "cheerio": "^1.0.0",
     "pino": "^9.4.0",
     "playwright": "^1.47.0",

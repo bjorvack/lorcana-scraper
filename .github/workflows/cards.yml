@@ -72,6 +72,13 @@ jobs:
             echo "changed=1" >> "$GITHUB_OUTPUT"
           fi
 
+      # Banlist + rotation travel with every cards-vN release. Both
+      # files come from the same lorcana.gg sources and refresh on the
+      # same monthly-ish cadence; co-locating means downstream consumers
+      # only pin one tag.
+      - name: Scrape banlist + rotation
+        run: pnpm scrape:legality --out ./out
+
       - name: Upload artifacts (always)
         uses: actions/upload-artifact@v4
         with:
@@ -126,4 +133,6 @@ jobs:
             --notes-file ./out/release-notes.md \
             ./out/cards.json \
             ./out/cards.json.sha256 \
-            ./out/cards-diff.md
+            ./out/cards-diff.md \
+            ./out/banlist.json \
+            ./out/rotation.json

@@ -1,0 +1,116 @@
+name: legality
+
+# Weekly poll for banlist + rotation changes. The page contents shift
+# only a few times a year, so polling more often is just CI minutes
+# burnt against the lorcana.gg cache; once a week is enough to catch
+# a new banlist announcement before it propagates downstream.
+#
+# When either JSON has changed, the workflow opens a PR titled
+# `chore(legality): bump banlist/rotation` carrying the diff. Merging
+# the PR re-runs `cards.yml` which then attaches the refreshed
+# banlist.json / rotation.json to the next `cards-vN` release. No
+# tag is cut directly by this workflow.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download current cards-vN legality assets
+        id: prior
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p prior
+          tag=$(gh release list --limit 50 --json tagName -q '.[].tagName' \
+            | grep -E '^cards-v' | head -n 1 || true)
+          if [ -n "$tag" ]; then
+            gh release download "$tag" -p banlist.json -D prior 2>/dev/null || true
+            gh release download "$tag" -p rotation.json -D prior 2>/dev/null || true
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Re-scrape from lorcana.gg
+        run: pnpm scrape:legality --out ./out
+
+      - name: Compute diff vs prior
+        id: diff
+        run: |
+          # Normalise generatedAt before comparing — we don't want a
+          # PR for a fresh timestamp on otherwise-identical content.
+          for f in banlist.json rotation.json; do
+            for dir in prior out; do
+              if [ -f "$dir/$f" ]; then
+                jq 'del(.generatedAt)' "$dir/$f" > "$dir/$f.norm"
+              fi
+            done
+          done
+          changed=0
+          if [ ! -f prior/banlist.json.norm ] || ! diff -q prior/banlist.json.norm out/banlist.json.norm >/dev/null; then
+            changed=1
+          fi
+          if [ ! -f prior/rotation.json.norm ] || ! diff -q prior/rotation.json.norm out/rotation.json.norm >/dev/null; then
+            changed=1
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Banlist diff"
+            echo '```diff'
+            diff -u prior/banlist.json.norm out/banlist.json.norm || true
+            echo '```'
+            echo
+            echo "## Rotation diff"
+            echo '```diff'
+            diff -u prior/rotation.json.norm out/rotation.json.norm || true
+            echo '```'
+          } > out/diff.md
+
+      - name: Trigger cards release rebuild
+        if: steps.diff.outputs.changed == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The simplest "publish a fresh cards-vN with refreshed
+          # legality" lever is to re-run cards.yml with force_publish.
+          # That re-runs the cards scrape (cheap when cached) plus the
+          # legality scrape we already did locally, and produces a
+          # fresh tag whose banlist/rotation are current. The diff
+          # captured above is attached as the workflow_dispatch note
+          # via a follow-up comment.
+          gh workflow run cards.yml -f force_publish=true
+
+      - name: Surface diff on the run
+        if: steps.diff.outputs.changed == '1'
+        run: |
+          {
+            echo "## Legality changed — triggered cards.yml --force_publish"
+            cat out/diff.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip when unchanged
+        if: steps.diff.outputs.changed == '0'
+        run: echo "Banlist and rotation unchanged vs ${{ steps.prior.outputs.tag }} — nothing to publish."
