@@ -75,10 +75,19 @@ export interface InkdecksAdapterOptions {
   readonly pageTo?: number;
   /** Optional cap on listing pages (defaults to "until empty page"). */
   readonly maxPages?: number;
-  /** Returning ``true`` drops the matching listing ref and stops
-   *  paginating — the orchestrator passes this so incremental runs
-   *  short-circuit at the first already-seen tournament. */
+  /** Returning ``true`` drops the matching listing ref — the
+   *  orchestrator passes this so already-known tournaments don't
+   *  count against ``maxResults``. We deliberately KEEP paginating
+   *  past seen refs so older tournaments deeper in the listing
+   *  still get picked up on subsequent runs; otherwise once a
+   *  source has ``maxResults`` tournaments in the prior we'd never
+   *  reach the tail and the backfill would stall. */
   readonly priorSeen?: (tournamentKey: string) => boolean;
+  /** Cap on the number of NEW (un-seen) tournaments emitted per
+   *  run. Pagination stops as soon as this many fresh refs have
+   *  been collected. Prior-seen refs are skipped without consuming
+   *  the budget. */
+  readonly maxResults?: number;
   /** Where to persist the Cloudflare cookie + localStorage between
    *  runs. Defaults to ``.cache/inkdecks-state.json``. */
   readonly stateFile?: string;
@@ -151,11 +160,11 @@ export class InkdecksAdapter implements SourceAdapter {
     }
     const pageFrom = this.#opts.pageFrom ?? 1;
     const pageTo = this.#opts.pageTo ?? Number.MAX_SAFE_INTEGER;
+    const maxResults = this.#opts.maxResults ?? Number.POSITIVE_INFINITY;
     const refs: TournamentRef[] = [];
     let listingPage = pageFrom;
-    let stop = false;
 
-    while (!stop && listingPage <= pageTo) {
+    while (listingPage <= pageTo) {
       const url = `${BASE}${LISTING_BASE}?sort=date&direction=desc${listingPage > 1 ? `&page=${listingPage}` : ""}`;
       // Wait for at least one tournament-decks anchor to materialise;
       // the page is JS-rendered so ``domcontentloaded`` returns
@@ -170,28 +179,31 @@ export class InkdecksAdapter implements SourceAdapter {
       await sleep(this.#opts.listingDelayMs ?? DEFAULT_PAGE_DELAY_MS);
 
       const items = await this.#scrapeListing(page);
-      if (items.length === 0) {
-        stop = true;
-        break;
-      }
-      let seenAny = false;
+      // An empty page means we've walked off the end of the
+      // pagination — nothing left to find.
+      if (items.length === 0) break;
+      let stopBudget = false;
       for (const item of items) {
         const date = parseListingDate(item.dateStr);
         if (!date) continue;
         const key = tournamentKey(item.href);
-        if (this.#opts.priorSeen?.(key)) {
-          stop = true;
-          break;
-        }
-        seenAny = true;
+        // Skip refs the orchestrator has already ingested but KEEP
+        // paginating — older un-seen tournaments may live deeper in
+        // the listing. This is what lets repeated capped runs walk
+        // the whole archive incrementally.
+        if (this.#opts.priorSeen?.(key)) continue;
         refs.push({
           tournamentKey: key,
           sourceUrl: item.href,
           name: item.text,
           date,
         });
+        if (refs.length >= maxResults) {
+          stopBudget = true;
+          break;
+        }
       }
-      if (!seenAny) break;
+      if (stopBudget) break;
       listingPage++;
       if (this.#opts.maxPages && listingPage - pageFrom + 1 > this.#opts.maxPages) break;
     }

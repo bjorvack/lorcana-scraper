@@ -180,7 +180,11 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     report.noteListing(adapter.sourceName, refs.length);
     process.stderr.write(`[${adapter.sourceName}] listed ${refs.length} tournaments\n`);
 
-    const limited = sourceCap !== undefined ? refs.slice(0, sourceCap) : refs;
+    // No pipeline-level slice: each adapter already obeys `maxResults`
+    // and — crucially — only counts NEW (un-seen) refs against that
+    // budget, so repeated capped runs eventually walk the whole archive
+    // instead of stalling once `prior` covers the listing's head.
+    const limited = refs;
     progress.setTournamentsTotal(limited.length);
 
     // Default to persisting after every tournament so a crash/SIGINT mid-run
@@ -431,6 +435,7 @@ function applyAdapterOptions(
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
       maxPages: opts.maxPages,
+      maxResults: opts.maxResults,
       deckConcurrency: opts.deckConcurrency,
       onTournamentStart: opts.onTournamentStart,
       onDeckFetched: opts.onDeckFetched,
