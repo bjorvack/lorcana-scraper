@@ -62,9 +62,7 @@ describe("parseDescription", () => {
   });
 
   it("accepts the 'Top N at <name>' variant", () => {
-    expect(
-      parseDescription('<a href="/tournaments/foo-bar">Top 8 at Foo Bar Open</a>'),
-    ).toEqual({
+    expect(parseDescription('<a href="/tournaments/foo-bar">Top 8 at Foo Bar Open</a>')).toEqual({
       tournamentSlug: "foo-bar",
       tournamentName: "Foo Bar Open",
       placement: 8,
