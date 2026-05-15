@@ -1,19 +1,34 @@
 /**
- * lorcana.gg / api.dotgg.gg adapter.
+ * lorcana.gg / api.dotgg.gg adapter — documented public API.
  *
- * Three endpoints (see DESIGN.md → "v1 adapter: lorcana.gg"):
+ * Talks to ONE endpoint:
  *
- *   GET /cgfw/gettournaments?game=lorcana&page=N
- *   GET /cgfw/gettournament?game=lorcana&slug=<slug>
- *   GET /cgfw/getdeck?game=lorcana&slug=<deck-slug>
+ *   GET /cgfw/getdecks?game=lorcana&rq=<urlencoded JSON>
  *
- * The adapter speaks the {@link SourceAdapter} interface but its
- * `fetchTournament` is special: each tournament page tells us which decks
- * to fetch by slug, and we fetch them with a bounded concurrency pool.
+ * (see https://dotgg.gg/api/ for the spec). We filter to
+ * `getdecks.is_tournament = "1"` and sort by date desc, then
+ * group decks by tournament slug parsed out of the
+ * `description` field — the doc-promised `tournament` object
+ * isn't populated for Lorcana yet but the description's anchor
+ * gives us slug + placement + tournament name.
  *
- * Card identifiers come back as `"<setCode>-<NNN>"` printing ids; the
- * pipeline's card index resolves them deterministically against the
- * pinned `cards-vN`.
+ * Each `/getdecks` page already contains the full deck list
+ * (`deck` field, `Record<setNumber, qty>` strings), so we don't
+ * need a per-deck round trip — the previous adapter's
+ * `gettournament` + `getdeck` calls are gone.
+ *
+ * Trade-offs vs the old undocumented endpoints:
+ *   - Lost: player_name (`authornick` is null for tournament decks).
+ *   - Lost: standing_record (W-L-D).
+ *   - Lost: players_count (no min-players gate possible — we
+ *     proxy it with "had at least N decks placing" via the
+ *     adapter's deck count).
+ *   - Lost: precise tournament date (we use the latest deck
+ *     date in the group, which is effectively the tournament
+ *     date for finalised events).
+ *
+ * Card identifiers are still `"<set>-<NNN>"` strings; the
+ * pipeline's `parsePrintingId` resolves them deterministically.
  */
 import { createHash } from "node:crypto";
 import { fetch } from "undici";
@@ -24,60 +39,35 @@ const BASE = "https://api.dotgg.gg/cgfw";
 const PER_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_ATTEMPTS = 3;
 
+/** /getdecks documented max page size. */
+const PAGE_SIZE = 30;
+
 /**
- * Default request spacing in ms. The rate limiter is a leaky bucket: the
- * next request returns after `requestSpacingMs` since the previous request
- * was issued, regardless of how many workers call it concurrently.
- *
- * Empirical Cloudflare 1015 thresholds on `api.dotgg.gg`:
- *   - 250 ms (4 RPS)  → trips within seconds
- *   - 500 ms (2 RPS)  → trips after ~50 s
- *   - 750 ms (1.3 RPS) → stable in our tests
- *   - 1100 ms (0.9 RPS) → comfortable, used by the prior long-running backfill
- *
- * We default to 750 ms, which is ~30 % faster than 1100 ms while still
- * leaving headroom for the listing+detail+deck request mix. The
- * `--rate-limit-ms` CLI flag lets a caller go faster or slower.
+ * Default request spacing. The /getdecks endpoint is friendlier
+ * than the old undocumented tournament endpoints, but the same
+ * Cloudflare front sits in front of api.dotgg.gg, so we keep
+ * the conservative spacing from before.
  */
 const DEFAULT_REQUEST_SPACING_MS = 750;
 const JITTER_RATIO = 0.15;
-
-/**
- * If the server tells us to wait longer than this on a 429, we bail and
- * let the orchestrator resume on a future run rather than block CI for
- * an hour. Cloudflare 1015 cooldowns are usually 5-10 minutes, so 15 min
- * gives us enough headroom to nap through one and keep the warmed state
- * (card index, prior dataset, HTTP cache) rather than restart.
- */
 const MAX_RETRY_AFTER_MS = 15 * 60_000;
-
-/**
- * On every 429 we permanently multiply the rate-limit interval by this
- * factor, up to {@link MAX_ADAPTIVE_SPACING_MS}. The idea: if the server
- * is pushing back, the configured rate is too fast for *this* session; a
- * one-way slowdown auto-discovers the sustainable ceiling without needing
- * the operator to tune `--rate-limit-ms` by hand.
- */
 const ADAPTIVE_SLOWDOWN_FACTOR = 1.5;
 const MAX_ADAPTIVE_SPACING_MS = 5_000;
-/**
- * With N concurrent workers, a single Cloudflare 1015 event typically
- * produces N near-simultaneous 429 responses (all workers had requests
- * in-flight when the limit tripped). Without a debounce each one would
- * independently multiply the interval, blowing past the sustainable
- * rate. Debounce so we only slow down once per "event window".
- */
 const SLOWDOWN_DEBOUNCE_MS = 30_000;
 const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
 
 /**
- * Leaky-bucket rate limiter: every `acquire()` returns after the bucket has
- * "filled" enough since the previous acquire. N parallel callers all share
- * the same `nextSlot` so the average rate is exactly `1000/intervalMs` RPS
- * regardless of concurrency.
+ * Stop pagination when we hit this many consecutive pages on
+ * which every deck belongs to a tournament `priorSeen` already
+ * acknowledges. Pages aren't perfectly ordered within a
+ * single tournament so a one-page tail isn't enough — two
+ * empty (all-seen) pages in a row is.
  */
+const STOP_AFTER_ALL_SEEN_PAGES = 2;
+
 class RateLimiter {
   private nextSlot = 0;
+  private lastSlowdownAt = 0;
   constructor(
     private intervalMs: number,
     private jitterRatio = JITTER_RATIO,
@@ -86,24 +76,13 @@ class RateLimiter {
   async acquire(): Promise<void> {
     const now = Date.now();
     const wait = Math.max(0, this.nextSlot - now);
-    // Jitter prevents N workers issuing in lock-step bursts after every
-    // acquire() returns simultaneously.
     const jitter = this.intervalMs * this.jitterRatio * (Math.random() * 2 - 1);
     this.nextSlot = Math.max(now, this.nextSlot) + this.intervalMs + jitter;
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   }
-  /** Push the next slot back (after a 429). */
   penalise(extraMs: number): void {
     this.nextSlot = Math.max(this.nextSlot, Date.now()) + extraMs;
   }
-  private lastSlowdownAt = 0;
-  /**
-   * Permanently widen the spacing for the remainder of the session, capped
-   * at {@link maxIntervalMs}. Returns the new interval so callers can log.
-   * Debounced: calls within {@link SLOWDOWN_DEBOUNCE_MS} of the previous
-   * one are treated as the same 1015 event and ignored so concurrent
-   * workers don't compound the multiplier.
-   */
   slowDown(factor = ADAPTIVE_SLOWDOWN_FACTOR): number {
     const now = Date.now();
     if (now - this.lastSlowdownAt < SLOWDOWN_DEBOUNCE_MS) return this.intervalMs;
@@ -117,114 +96,70 @@ class RateLimiter {
 }
 
 export interface LorcanaGgOptions {
-  /** Hard cap on pagination. Default 200 (~6000 tournaments). */
+  /** Hard cap on pagination. Default 500 pages × 30 decks = 15k decks. */
   readonly maxPages?: number;
-  /**
-   * Sharding: only list pages in the closed range [pageFrom, pageTo]. Used
-   * by CI matrix jobs to split the ~57 listing pages across N runners so
-   * each gets its own Cloudflare rate-limit budget. Defaults to [1,
-   * maxPages].
-   */
-  readonly pageFrom?: number;
-  readonly pageTo?: number;
-  /** Maximum simultaneous deck fetches per tournament. Default 3. */
-  readonly deckConcurrency?: number;
-  /**
-   * Optional callback: when listing tournaments, stop paginating as soon
-   * as we see a tournamentKey for which `priorSeen(key)` returns true.
-   * Used by the orchestrator to make incremental runs fast.
-   */
+  /** Skip tournaments the orchestrator has already ingested. */
   readonly priorSeen?: (tournamentKey: string) => boolean;
-  /**
-   * Deck-level skip predicate (D1). The adapter computes the
-   * prospective `Deck.externalKey` from `(sourceName, deck slug
-   * URL)` BEFORE fetching deck content; if `priorDecksSeen(key)`
-   * is true we skip the fetch entirely. The orchestrator's E1 merge
-   * fills the prior copy back in on the way out, so net effect is
-   * "don't re-download decks we already have".
-   */
+  /** Skip individual decks already in the prior dataset (D1). */
   readonly priorDecksSeen?: (deckExternalKey: string) => boolean;
-  /**
-   * Short-circuit pagination once `listTournaments` has gathered this many
-   * not-yet-seen refs. Helpful for dev runs ("just fetch me a couple").
-   */
+  /** Stop once we've collected this many NEW (un-seen) tournament refs. */
   readonly maxResults?: number;
-  /** Skip tournaments with fewer than this many `players_count`. */
-  readonly minPlayers?: number;
   /**
-   * Per tournament, only fetch the top-N decks by `standing_place`. A common
-   * choice is 16 (top-cut) or 32 (cut + extended). Default: no limit.
+   * Min "deck count" gate. The documented API doesn't expose
+   * `players_count`, so we use the number of decks observed for
+   * a tournament as a proxy. A tournament is dropped if fewer
+   * than `minPlayers` decks were ingested for it.
    */
+  readonly minPlayers?: number;
+  /** Per tournament, only keep the top-N decks by placement. */
   readonly maxDecksPerTournament?: number;
   /** Optional progress callback fired once per attempted deck. */
   readonly onDeckFetched?: (args: { resolved: boolean; failed: boolean }) => void;
-  /**
-   * B2 streaming hook. Fired with the actual `RawDeck` immediately
-   * after it's fetched & parsed, *before* the tournament finishes.
-   * The orchestrator uses this to persist a partial-tournament
-   * snapshot per deck so a crash mid-tournament keeps every deck
-   * that already made it through.
-   */
+  /** B2 streaming hook fired with each `RawDeck` as it's parsed. */
   readonly onDeckScraped?: (deck: RawDeck) => void;
-  /** Optional callback fired right before deck fetches start. */
+  /** Fired right before we start emitting decks for a tournament. */
   readonly onTournamentStart?: (args: { deckCount: number }) => void;
-  /**
-   * Spacing between issued requests in ms. Lower = faster, but Cloudflare
-   * 1015 trips around 4+ RPS. Default 500 ms (= 2 RPS). Concurrent fetches
-   * share the same bucket so this is sustained, not per-worker.
-   */
+  /** Override request spacing (ms). */
   readonly requestSpacingMs?: number;
   /**
-   * Optional directory in which to persist cached JSON responses for
-   * immutable endpoints (individual tournaments + decks). With a cache
-   * directory set, re-runs skip the network for any URL we've previously
-   * fetched successfully — genuinely free tournaments on subsequent runs.
+   * Optional HTTP cache directory. /getdecks is paginated by
+   * date desc, so listing pages get a short TTL — the rest of
+   * the data is finalised once a tournament closes.
    */
   readonly cacheDir?: string;
+  /** Compatibility shims (no-ops for the documented adapter). */
+  readonly pageFrom?: number;
+  readonly pageTo?: number;
+  readonly deckConcurrency?: number;
 }
 
-interface TournamentSummary {
-  date: string;
-  name: string;
+/** Raw shape of a /getdecks deck entry (only the fields we use). */
+interface DeckListEntry {
   slug: string;
-  organizer_name?: string;
-  players_count?: string;
-  format?: string;
-  winner_name?: string;
-}
-
-interface TournamentDetail {
-  id?: string;
-  date: string;
-  name: string;
-  slug: string;
-  organizer_name?: string;
-  players_count?: string;
-  format?: string;
-  winner_name?: string;
-  standings: StandingEntry[];
-}
-
-interface StandingEntry {
-  standing_place: string;
-  standing_record?: string;
-  player_name?: string | null;
-  slug?: string | null; // deck slug
   humanname?: string | null;
+  date: string; // unix seconds as string
+  description?: string | null; // HTML, e.g. `<a href="/tournaments/foo">Place 1 on Foo</a>`
+  is_tournament?: string;
   color_amber?: string;
   color_amethyst?: string;
   color_emerald?: string;
   color_ruby?: string;
   color_sapphire?: string;
   color_steel?: string;
-  archetype?: string;
-  format?: string;
+  deck?: Record<string, string>; // "<set>-<NNN>" → "<count>"
 }
 
-interface DeckDetail {
-  slug: string;
-  humanname?: string;
-  deck: Record<string, string>; // "<setCode>-<NNN>" → "<count>"
+interface ParsedDescription {
+  tournamentSlug: string;
+  tournamentName: string;
+  placement?: number;
+}
+
+interface PendingTournament {
+  ref: TournamentRef;
+  rawDecks: RawDeck[];
+  /** Latest seen unix-seconds date across this tournament's decks. */
+  latestDate: number;
 }
 
 export class LorcanaGgAdapter implements SourceAdapter {
@@ -232,154 +167,169 @@ export class LorcanaGgAdapter implements SourceAdapter {
 
   private readonly rateLimiter: RateLimiter;
   private readonly cache: HttpCache | null;
+  /** Populated by `listTournaments`, drained by `fetchTournament`. */
+  private readonly pending = new Map<string, PendingTournament>();
 
   constructor(private readonly opts: LorcanaGgOptions = {}) {
     this.rateLimiter = new RateLimiter(opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS);
     this.cache = opts.cacheDir ? new HttpCache(opts.cacheDir) : null;
   }
 
-  /** Expose cache hit/miss counters for end-of-run reporting. */
   cacheStats(): { hits: number; misses: number } | null {
     return this.cache?.stats() ?? null;
   }
 
   async listTournaments(): Promise<TournamentRef[]> {
-    const maxPages = this.opts.maxPages ?? 200;
+    const maxPages = this.opts.maxPages ?? 500;
     const maxResults = this.opts.maxResults ?? Number.POSITIVE_INFINITY;
     const minPlayers = this.opts.minPlayers ?? 0;
-    const pageFrom = Math.max(1, this.opts.pageFrom ?? 1);
-    const pageTo = Math.min(maxPages, this.opts.pageTo ?? maxPages);
-    const refs: TournamentRef[] = [];
-    for (let page = pageFrom; page <= pageTo; page++) {
-      const summaries = await this.fetchTournamentsPage(page);
-      if (summaries.length === 0) break;
-      for (const s of summaries) {
-        const url = tournamentUrl(s.slug);
-        // Dedup key matches `mergeTournaments`' `tournamentKeyOf`
-        // (sourceName + sourceUrl) so a re-run with `--prior` skips
-        // tournaments already in the prior dataset.
-        const key = `${this.sourceName}:${url}`;
-        if (this.opts.priorSeen?.(key)) continue;
-        const players = Number.parseInt(s.players_count ?? "0", 10);
-        if (Number.isFinite(players) && players < minPlayers) continue;
-        refs.push({
-          tournamentKey: key,
-          sourceUrl: url,
-          name: s.name,
-          date: toIsoDate(s.date),
-        });
-        if (refs.length >= maxResults) return refs;
+    const maxDecksPerTournament = this.opts.maxDecksPerTournament;
+    const priorSeen = this.opts.priorSeen ?? (() => false);
+    const priorDecksSeen = this.opts.priorDecksSeen ?? (() => false);
+
+    this.pending.clear();
+
+    let allSeenStreak = 0;
+    for (let page = 1; page <= maxPages; page++) {
+      const entries = await this.fetchDecksPage(page);
+      if (entries.length === 0) break;
+
+      let pageHasNew = false;
+      for (const e of entries) {
+        const parsed = parseDescription(e.description);
+        if (!parsed) continue; // tournament link missing → skip
+        const url = tournamentUrl(parsed.tournamentSlug);
+        const tournamentKeyVal = `${this.sourceName}:${url}`;
+
+        if (priorSeen(tournamentKeyVal)) continue;
+        pageHasNew = true;
+
+        const externalUrl = `https://lorcana.gg/decks/${e.slug}`;
+        if (priorDecksSeen(deckExternalKey(this.sourceName, externalUrl))) continue;
+
+        const rawDeck = entryToRawDeck(e, parsed, externalUrl);
+        if (!rawDeck) continue;
+
+        const dateSecs = Number.parseInt(e.date, 10) || 0;
+        let bucket = this.pending.get(tournamentKeyVal);
+        if (!bucket) {
+          bucket = {
+            ref: {
+              tournamentKey: tournamentKeyVal,
+              sourceUrl: url,
+              name: parsed.tournamentName,
+              date: toIsoDate(e.date),
+            },
+            rawDecks: [],
+            latestDate: dateSecs,
+          };
+          this.pending.set(tournamentKeyVal, bucket);
+        }
+        bucket.rawDecks.push(rawDeck);
+        if (dateSecs > bucket.latestDate) {
+          bucket.latestDate = dateSecs;
+          // Refresh the ref's date so it reflects the freshest deck.
+          (bucket.ref as { date?: string }).date = toIsoDate(e.date);
+        }
       }
+
+      // Early-exit: 2 consecutive pages with no new tournaments → done.
+      if (!pageHasNew) {
+        allSeenStreak++;
+        if (allSeenStreak >= STOP_AFTER_ALL_SEEN_PAGES) break;
+      } else {
+        allSeenStreak = 0;
+      }
+      if (this.pending.size >= maxResults) break;
+      if (entries.length < PAGE_SIZE) break;
+    }
+
+    // Apply min-deck and top-N caps. minPlayers acts as a deck-count
+    // proxy now (see option doc).
+    const refs: TournamentRef[] = [];
+    for (const [key, t] of this.pending) {
+      if (t.rawDecks.length < minPlayers) {
+        this.pending.delete(key);
+        continue;
+      }
+      // Sort by placement asc; missing placement sinks to the bottom.
+      t.rawDecks.sort(
+        (a, b) =>
+          (a.placement ?? Number.MAX_SAFE_INTEGER) - (b.placement ?? Number.MAX_SAFE_INTEGER),
+      );
+      if (typeof maxDecksPerTournament === "number") {
+        t.rawDecks.length = Math.min(t.rawDecks.length, maxDecksPerTournament);
+      }
+      refs.push(t.ref);
     }
     return refs;
   }
 
   async fetchTournament(ref: TournamentRef): Promise<RawTournament> {
-    const slug = slugFromUrl(ref.sourceUrl);
-    const detail = await this.fetchTournamentDetail(slug);
-    // With a shared rate limiter the effective RPS is constant regardless
-    // of concurrency, so we can safely run 4 workers in parallel. That
-    // pipelines JSON parsing while the next request is in flight.
-    const concurrency = this.opts.deckConcurrency ?? 4;
-    let standings = detail.standings.filter((s) => typeof s.slug === "string" && s.slug);
-    // Top-N by placement (1 is the best, missing places sort last).
-    standings.sort(
-      (a, b) =>
-        (Number.parseInt(a.standing_place, 10) || Number.MAX_SAFE_INTEGER) -
-        (Number.parseInt(b.standing_place, 10) || Number.MAX_SAFE_INTEGER),
-    );
-    if (typeof this.opts.maxDecksPerTournament === "number") {
-      standings = standings.slice(0, this.opts.maxDecksPerTournament);
+    const bucket = this.pending.get(ref.tournamentKey);
+    if (!bucket) {
+      // listTournaments wasn't called or the ref is unknown — fall back
+      // to an empty tournament; the orchestrator will treat it as a
+      // resolution failure rather than crash.
+      return {
+        sourceUrl: ref.sourceUrl,
+        name: ref.name ?? slugFromUrl(ref.sourceUrl),
+        date: ref.date ?? new Date().toISOString().slice(0, 10),
+        decks: [],
+      };
     }
-    this.opts.onTournamentStart?.({ deckCount: standings.length });
-    const onDeckFetched = this.opts.onDeckFetched;
-    const onDeckScraped = this.opts.onDeckScraped;
-    const decks = await mapInPool(standings, concurrency, async (s) => {
-      const result = await this.standingToRawDeck(s);
-      onDeckFetched?.({ resolved: result !== null, failed: result === null });
-      // B2: stream the deck out the moment it's ready so the pipeline
-      // can persist a partial-tournament snapshot. We deliberately
-      // call this even for D1-skipped decks (result === null when the
-      // skip happens) so the orchestrator sees uniform progress.
-      if (result) onDeckScraped?.(result);
-      return result;
+    this.opts.onTournamentStart?.({ deckCount: bucket.rawDecks.length });
+    const onFetched = this.opts.onDeckFetched;
+    const onScraped = this.opts.onDeckScraped;
+    for (const d of bucket.rawDecks) {
+      onFetched?.({ resolved: true, failed: false });
+      onScraped?.(d);
+    }
+    return {
+      sourceUrl: ref.sourceUrl,
+      name: ref.name ?? bucket.ref.name ?? slugFromUrl(ref.sourceUrl),
+      date: ref.date ?? bucket.ref.date ?? toIsoDate(String(bucket.latestDate)),
+      decks: bucket.rawDecks,
+    };
+  }
+
+  private async fetchDecksPage(page: number): Promise<DeckListEntry[]> {
+    const rq = JSON.stringify({
+      page,
+      limit: PAGE_SIZE,
+      srt: "date",
+      direct: "desc",
+      type: "",
+      my: 0,
+      myarchive: 0,
+      fav: 0,
+      getdecks: {
+        hascrd: [],
+        nothascrd: [],
+        youtube: 0,
+        smartsrch: "",
+        date: "",
+        color: [],
+        collection: 0,
+        topset: "",
+        at: 0,
+        format: "",
+        is_tournament: "1",
+        legalonly: 0,
+        priceMin: "",
+        priceMax: "",
+        priceCurrency: "usd",
+        placement: "",
+      },
     });
-    const isoDate = toIsoDate(detail.date);
-
-    return {
-      sourceUrl: tournamentUrl(slug),
-      name: detail.name,
-      date: isoDate,
-      decks: decks.filter((d): d is RawDeck => d !== null),
-    };
-  }
-
-  private async standingToRawDeck(s: StandingEntry): Promise<RawDeck | null> {
-    if (!s.slug) return null;
-    // D1: skip the network round-trip if we already have this deck
-    // in the prior dataset. The pipeline's E1 merge will re-attach
-    // the prior copy so the resulting tournament is unchanged.
-    const externalUrl = `https://lorcana.gg/decks/${s.slug}`;
-    if (this.opts.priorDecksSeen?.(deckExternalKey(this.sourceName, externalUrl))) {
-      return null;
-    }
-    const deck = await this.fetchDeck(s.slug);
-    if (!deck) return null;
-    const cards: { rawName: string; count: number }[] = [];
-    for (const [printingId, rawCount] of Object.entries(deck.deck ?? {})) {
-      const count = Number.parseInt(rawCount, 10);
-      if (!Number.isFinite(count) || count <= 0) continue;
-      cards.push({ rawName: printingId, count });
-    }
-    if (cards.length === 0) return null;
-    return {
-      placement: parseIntOrUndefined(s.standing_place),
-      player: s.player_name ?? undefined,
-      inks: inksFromStanding(s),
-      cards,
-      externalId: s.slug,
-      externalUrl: `https://lorcana.gg/decks/${s.slug}`,
-      displayName: s.humanname ?? undefined,
-    };
-  }
-
-  private async fetchTournamentsPage(page: number): Promise<TournamentSummary[]> {
-    const url = `${BASE}/gettournaments?game=lorcana&page=${page}`;
-    return await this.getJson<TournamentSummary[]>(url, []);
-  }
-
-  private async fetchTournamentDetail(slug: string): Promise<TournamentDetail> {
-    const url = `${BASE}/gettournament?game=lorcana&slug=${encodeURIComponent(slug)}`;
-    return await this.getJson<TournamentDetail>(url);
-  }
-
-  private async fetchDeck(slug: string): Promise<DeckDetail | null> {
-    const url = `${BASE}/getdeck?game=lorcana&slug=${encodeURIComponent(slug)}`;
-    try {
-      return await this.getJson<DeckDetail>(url);
-    } catch {
-      // A 404 / parse error on one deck shouldn't fail the whole run; the
-      // orchestrator's resolution report will surface it.
-      return null;
-    }
+    const url = `${BASE}/getdecks?game=lorcana&rq=${encodeURIComponent(rq)}`;
+    return await this.getJson<DeckListEntry[]>(url, []);
   }
 
   private async getJson<T>(url: string, fallback?: T): Promise<T> {
-    // Immutable endpoints (finalized tournaments + decks): cache
-    // forever. Listing pages get a 15-minute TTL via getWithinTtl so
-    // rapid re-runs hit cache without serving stale data forever.
-    const immutableCacheable =
-      this.cache !== null && (url.includes("/gettournament?") || url.includes("/getdeck?"));
-    const listingCacheable = this.cache !== null && url.includes("/gettournaments?");
-    if (immutableCacheable) {
-      const cached = await this.cache!.get<T>(url);
-      if (cached !== null) return cached;
-    } else if (listingCacheable) {
-      // C1: 15-min TTL on listing pages. Short enough that "I just
-      // released a tournament" still gets picked up next hour; long
-      // enough that re-running locally during dev costs zero
-      // Cloudflare budget.
-      const cached = await this.cache!.getWithinTtl<T>(url, 15 * 60_000);
+    // /getdecks is a listing endpoint sorted by date desc — short TTL.
+    if (this.cache !== null) {
+      const cached = await this.cache.getWithinTtl<T>(url, 15 * 60_000);
       if (cached !== null) return cached;
     }
     let lastErr: unknown;
@@ -394,12 +344,8 @@ export class LorcanaGgAdapter implements SourceAdapter {
               `${url}: HTTP 429 with retry-after=${retryAfterMs / 1000}s — refusing to wait`,
             );
           }
-          // Push every other in-flight worker out by retryAfter as well — they
-          // were issued at roughly the same rate so they'd all 429 in a row.
           const waitMs = Math.max(retryAfterMs, backoff(attempt));
           this.rateLimiter.penalise(waitMs);
-          // Adaptive slowdown: the configured rate is too fast for this
-          // session, so widen the interval permanently (capped).
           const newInterval = this.rateLimiter.slowDown();
           console.warn(
             `  [lorcana.gg] 429 on ${url} — sleeping ${(waitMs / 1000).toFixed(0)}s, new spacing ${newInterval}ms`,
@@ -418,7 +364,7 @@ export class LorcanaGgAdapter implements SourceAdapter {
         }
         if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
         const parsed = (await res.json()) as T;
-        if (immutableCacheable || listingCacheable) await this.cache!.set(url, parsed);
+        if (this.cache !== null) await this.cache.set(url, parsed);
         return parsed;
       } catch (err) {
         lastErr = err;
@@ -438,11 +384,6 @@ export function tournamentKey(sourceName: string, slug: string): string {
   return `${sourceName}:${slug}`;
 }
 
-/**
- * Same formula the pipeline uses to stamp `Deck.externalKey` —
- * sha256(`<sourceName>|<externalUrl>`). Adapters call this BEFORE
- * fetching to consult `priorDecksSeen` (D1).
- */
 export function deckExternalKey(sourceName: string, externalUrl: string): string {
   return createHash("sha256").update(`${sourceName}|${externalUrl}`).digest("hex");
 }
@@ -465,7 +406,17 @@ export function toIsoDate(unixSecondsAsString: string): string {
   return new Date(seconds * 1000).toISOString().slice(0, 10);
 }
 
-export function inksFromStanding(s: StandingEntry): string[] {
+/** Subset of the /getdecks ink fields, accepted by `inksFromStanding`. */
+export interface InkFields {
+  color_amber?: string;
+  color_amethyst?: string;
+  color_emerald?: string;
+  color_ruby?: string;
+  color_sapphire?: string;
+  color_steel?: string;
+}
+
+export function inksFromStanding(s: InkFields): string[] {
   const cols: [string, string | undefined][] = [
     ["Amber", s.color_amber],
     ["Amethyst", s.color_amethyst],
@@ -479,46 +430,74 @@ export function inksFromStanding(s: StandingEntry): string[] {
     .map(([name]) => name);
 }
 
-function parseIntOrUndefined(s: string | undefined): number | undefined {
-  if (!s) return undefined;
-  const n = Number.parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
+/**
+ * Parse the deck `description` field from /getdecks. Lorcana
+ * tournament decks come back as
+ *
+ *   `<a href="/tournaments/<slug>">Place <N> on <Tournament Name></a>`
+ *
+ * Returns `null` for non-tournament descriptions.
+ */
+export function parseDescription(html: string | null | undefined): ParsedDescription | null {
+  if (!html) return null;
+  const anchor = /<a\s+href="\/tournaments\/([^"]+)"[^>]*>([^<]+)<\/a>/i.exec(html);
+  if (!anchor) return null;
+  const tournamentSlug = decodeURIComponent(anchor[1]!);
+  const text = anchor[2]!.trim();
+  // "Place <N> on <Name>" or "Top <N> at <Name>", be lenient.
+  const m = /^(?:Place|Top)\s+(\d+)\s+(?:on|at)\s+(.+)$/i.exec(text);
+  if (m) {
+    return {
+      tournamentSlug,
+      tournamentName: m[2]!.trim(),
+      placement: Number.parseInt(m[1]!, 10),
+    };
+  }
+  // Fallback: no placement, but a tournament anchor — keep the slug.
+  return { tournamentSlug, tournamentName: text, placement: undefined };
 }
 
-async function mapInPool<T, R>(
-  items: readonly T[],
-  concurrency: number,
-  worker: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  async function pump(): Promise<void> {
-    while (true) {
-      const i = next++;
-      if (i >= items.length) return;
-      results[i] = await worker(items[i]!);
-    }
+function entryToRawDeck(
+  e: DeckListEntry,
+  parsed: ParsedDescription,
+  externalUrl: string,
+): RawDeck | null {
+  const cards: { rawName: string; count: number }[] = [];
+  for (const [printingId, rawCount] of Object.entries(e.deck ?? {})) {
+    const count = Number.parseInt(rawCount, 10);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    cards.push({ rawName: printingId, count });
   }
-  const lanes = Math.max(1, Math.min(concurrency, items.length));
-  await Promise.all(Array.from({ length: lanes }, () => pump()));
-  return results;
+  if (cards.length === 0) return null;
+  return {
+    placement: parsed.placement,
+    player: undefined,
+    inks: inksFromStanding(e),
+    cards,
+    externalId: e.slug,
+    externalUrl,
+    displayName: e.humanname ?? undefined,
+  };
 }
 
 async function timedFetch(url: string) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
   try {
     return await fetch(url, {
-      headers: { "user-agent": USER_AGENT, accept: "application/json" },
       signal: ctrl.signal,
+      headers: {
+        accept: "application/json",
+        "user-agent": USER_AGENT,
+      },
     });
   } finally {
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
 function backoff(attempt: number): number {
-  return 250 * 2 ** (attempt - 1) + Math.floor(Math.random() * 100);
+  return Math.min(15_000, 500 * 2 ** (attempt - 1));
 }
 
 function sleep(ms: number): Promise<void> {
