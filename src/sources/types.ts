@@ -33,7 +33,7 @@ export interface RawDeck {
 }
 
 export interface SourceAdapter {
-  /** Stable identifier, e.g. "inkdecks.com". */
+  /** Stable identifier, e.g. "limitlesstcg.com". */
   readonly sourceName: string;
   listTournaments(ctx: ScrapeContext): Promise<TournamentRef[]>;
   fetchTournament(ref: TournamentRef, ctx: ScrapeContext): Promise<RawTournament>;

@@ -2,9 +2,9 @@
  * Limitless TCG adapter (play.limitlesstcg.com).
  *
  * Limitless hosts tournaments for many TCGs including Disney Lorcana
- * (game id ``LORCANA``). Unlike inkdecks.com and lorcana.gg, this is a
- * **public, documented REST API** that returns clean JSON — no
- * Cloudflare Turnstile, no headless chromium, no HTML scraping.
+ * (game id ``LORCANA``). This is a **public, documented REST API**
+ * that returns clean JSON — no HTML scraping, no Cloudflare
+ * Turnstile, no headless browser.
  *
  * Endpoints used (all relative to ``https://play.limitlesstcg.com/api``):
  *

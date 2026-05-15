@@ -74,8 +74,8 @@ describe("tournamentStore", () => {
     const dir = mkdtempSync(resolve(tmpdir(), "ts-"));
     writeFailedTournament(dir, {
       externalKey: "ffff",
-      sourceName: "inkdecks.com",
-      sourceUrl: "https://inkdecks.com/x",
+      sourceName: "limitlesstcg.com",
+      sourceUrl: "https://play.limitlesstcg.com/tournament/x",
       attemptedAt: "2026-05-14T00:00:00Z",
       error: "boom",
     });

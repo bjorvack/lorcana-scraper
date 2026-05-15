@@ -24,7 +24,6 @@ import {
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "../sources/types.js";
-import { InkdecksAdapter } from "../sources/inkdecks.js";
 import { LimitlessAdapter } from "../sources/limitless.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
@@ -61,7 +60,7 @@ export interface RunOptions {
    * shardIndex`. Auto-balances regardless of how many tournaments
    * each source has — unlike page-range sharding, which assumed
    * lorcana.gg's API page count and silently dropped half of
-   * inkdecks's archive.
+   * each source.
    *
    * Default: no filtering (process all refs). Set both shardIndex
    * (0-based) and shardCount (>=1) to enable.
@@ -71,8 +70,8 @@ export interface RunOptions {
   /**
    * Max tournaments per source per run (top of pagination). Default: unlimited.
    * Either a number (uniform cap) or a `{ name: N, default?: N }` map for
-   * per-source caps. Useful when a slow adapter (e.g. inkdecks.com behind
-   * Cloudflare Turnstile) would otherwise stall the whole job.
+   * per-source caps. Useful when a slow or rate-limited adapter would
+   * otherwise stall the whole job.
    */
   readonly maxTournaments?: number | Record<string, number>;
   /** Concurrency for deck fetches inside each tournament. Default: 1 (rate-limit-friendly). */
@@ -186,11 +185,10 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   writeShardMeta({ opts, cards, enabled });
 
   // Adapters we instantiated (and therefore must close at end of run).
-  // Without this the InkdecksAdapter leaves a headless chromium child
-  // process running forever, keeping node alive even after the
-  // pipeline returned successfully — that's the "stuck on writing
-  // dataset.json" symptom: the message printed, then the process sat
-  // on open subprocess handles for the rest of the job timeout.
+  // Closing adapters lets node exit cleanly. Even though both
+  // current adapters are pure HTTP, undici's keep-alive pool can
+  // hold connections open past end-of-pipeline; .close() drops
+  // them so the runner doesn't wait the full timeout.
   const liveAdapters: { close?: () => Promise<void> }[] = [];
 
   for (const adapter of enabled) {
@@ -403,9 +401,9 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     report: finalReport,
   });
 
-  // Close adapters before returning so node can exit cleanly.
-  // Without this, InkdecksAdapter leaks a headless chromium child
-  // process and the runner waits the full job timeout for it.
+  // Close adapters before returning so node can exit cleanly. Both
+  // current adapters use undici, whose connection pool can keep
+  // sockets alive after the pipeline returns.
   for (const a of liveAdapters) {
     if (typeof a.close === "function") {
       try {
@@ -627,24 +625,6 @@ function applyAdapterOptions(
       onDeckFetched: opts.onDeckFetched,
       onDeckScraped: opts.onDeckScraped,
       onTournamentStart: opts.onTournamentStart,
-    });
-  }
-  if (adapter instanceof InkdecksAdapter) {
-    return new InkdecksAdapter({
-      priorSeen: opts.priorSeen,
-      priorDecksSeen: opts.priorDecksSeen,
-      pageFrom: opts.pageFrom,
-      pageTo: opts.pageTo,
-      maxPages: opts.maxPages,
-      maxResults: opts.maxResults,
-      deckConcurrency: opts.deckConcurrency,
-      // D3: stagger shards by 8s per index. Shard 0 starts immediately,
-      // shard 7 sleeps 56s. D2's shared cf_clearance cache means later
-      // shards usually find a fresh cookie waiting for them.
-      startupStaggerMs: opts.shardCount && opts.shardCount > 1 ? (opts.shardIndex ?? 0) * 8_000 : 0,
-      onTournamentStart: opts.onTournamentStart,
-      onDeckFetched: opts.onDeckFetched,
-      onDeckScraped: opts.onDeckScraped,
     });
   }
   return adapter;

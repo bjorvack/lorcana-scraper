@@ -144,8 +144,8 @@ function parseArgs(argv: string[]): Args {
  *
  * Examples:
  *   "50"                               → 50
- *   "inkdecks.com=40,lorcana.gg=200"   → { "inkdecks.com": 40, "lorcana.gg": 200 }
- *   "100,inkdecks.com=40"              → { default: 100, "inkdecks.com": 40 }
+ *   "limitlesstcg.com=40,lorcana.gg=200" → { "limitlesstcg.com": 40, "lorcana.gg": 200 }
+ *   "100,limitlesstcg.com=40"          → { default: 100, "limitlesstcg.com": 40 }
  */
 function parseMaxTournaments(raw: string): number | Record<string, number> {
   // Plain integer keeps the legacy shape so existing CLI invocations
@@ -191,7 +191,7 @@ function printUsage(): void {
       "  --max-tournaments <spec>   Cap tournaments per source. Either a bare",
       "                             integer (uniform cap), or a CSV of",
       "                             `name=N` (with optional `default=N`),",
-      "                             e.g. `inkdecks.com=40,lorcana.gg=200`",
+      "                             e.g. `limitlesstcg.com=40,lorcana.gg=200`",
       "  --max-pages <n>            Cap pagination depth",
       "  --page-from <n>            Only list pages >= N (shard; default: 1)",
       "  --page-to <n>              Only list pages <= N (shard; default: max-pages)",
@@ -275,10 +275,10 @@ export async function runTournamentsCli(argv = process.argv.slice(2)): Promise<v
 const isDirectRun = import.meta.url === `file://${process.argv[1]}`;
 if (isDirectRun) {
   // Force exit when the CLI returns successfully. Even after every
-  // adapter has been .close()'d, undici's connection pool and
-  // playwright's IPC channels can keep the event loop alive for a
-  // few extra seconds; this prevents the CI runner from waiting on
-  // those out-of-band handles for the full job timeout.
+  // adapter has been .close()'d, undici's connection pool can keep
+  // the event loop alive for a few extra seconds; this prevents the
+  // CI runner from waiting on those out-of-band handles for the full
+  // job timeout.
   runTournamentsCli()
     .then(() => process.exit(0))
     .catch((err) => {
