@@ -6,9 +6,10 @@ name: scrape
 #   prepare           — resolve pinned cards-vN + latest tournaments-vN
 #   scrape-limitless  — single runner, REST API
 #   scrape-lorcana-gg — single runner, HTTP-only via dotgg
+#   scrape-topdeck    — single runner, REST API (TOPDECK_API_KEY)
 #   merge             — stitch shard artifacts into one dataset
 #
-# Both adapters are API-based — no HTML scraping, no headless
+# All adapters are API-based — no HTML scraping, no headless
 # browser, no Cloudflare Turnstile. A 1015 / 429 on one source
 # can't kill the other; per-tournament artifact files (B1) mean
 # a shard that fails partway still contributes everything it had
@@ -227,10 +228,67 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  scrape-topdeck:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # TopDeck.gg's bulk endpoint has a low rate limit, but Lorcana
+    # coverage is sparse so any single scrape stays well under the
+    # cap. 30 min is plenty.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Run pipeline (topdeck.gg)
+        env:
+          # The adapter is a no-op when this secret is missing, so a
+          # fork without the secret won't fail the job — it just
+          # contributes zero tournaments to the merged dataset.
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: |
+          args=()
+          max_t="${{ inputs.max_tournaments }}"
+          [ -n "$max_t" ] && args+=("--max-tournaments" "$max_t")
+          if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
+            args+=("--prior" "./prior/dataset.json")
+          fi
+          pnpm scrape:tournaments \
+            --cards ./cards/cards.json \
+            --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --sources topdeck.gg \
+            --max-decks-per-tournament 16 \
+            --min-players 8 \
+            --out ./out "${args[@]}"
+
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-topdeck
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   merge:
     # Run even if some shards failed — we still want to publish whatever
     # partial data made it through. `prepare` is non-negotiable though.
-    needs: [prepare, scrape-limitless, scrape-lorcana-gg]
+    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-topdeck]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
