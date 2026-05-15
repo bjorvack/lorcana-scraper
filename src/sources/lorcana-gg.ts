@@ -57,13 +57,26 @@ const SLOWDOWN_DEBOUNCE_MS = 30_000;
 const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
 
 /**
- * Stop pagination when we hit this many consecutive pages on
- * which every deck belongs to a tournament `priorSeen` already
- * acknowledges. Pages aren't perfectly ordered within a
- * single tournament so a one-page tail isn't enough — two
- * empty (all-seen) pages in a row is.
+ * Stop pagination when we've seen this many consecutive
+ * already-ingested decks without a single new tournament
+ * appearing. The counter resets the moment we encounter a
+ * deck whose tournament is NOT in `priorSeen`.
+ *
+ * A *deck-level* threshold (rather than per-page) is the only
+ * correct heuristic because /getdecks is sorted by deck date
+ * desc and a single popular tournament can easily span 4+
+ * pages on its own. Mulligan Challenge #25 had 108 decks,
+ * filling pages 1-4. With a per-page heuristic of 2 we
+ * stopped at page 2 and missed legitimate new tournaments
+ * that started appearing on page 3.
+ *
+ * 240 covers the biggest published Lorcana tournaments
+ * (DLC top-cut + Swiss = ~256 decks) with margin. If a
+ * single tournament ever exceeds this we'd false-stop, but
+ * the next run will catch any tail because /getdecks keeps
+ * paginating older tournaments after a big one finishes.
  */
-const STOP_AFTER_ALL_SEEN_PAGES = 2;
+const STOP_AFTER_PRIOR_SEEN_DECKS = 240;
 
 class RateLimiter {
   private nextSlot = 0;
@@ -189,20 +202,24 @@ export class LorcanaGgAdapter implements SourceAdapter {
 
     this.pending.clear();
 
-    let allSeenStreak = 0;
-    for (let page = 1; page <= maxPages; page++) {
+    let priorSeenStreak = 0;
+    pages: for (let page = 1; page <= maxPages; page++) {
       const entries = await this.fetchDecksPage(page);
       if (entries.length === 0) break;
 
-      let pageHasNew = false;
       for (const e of entries) {
         const parsed = parseDescription(e.description);
         if (!parsed) continue; // tournament link missing → skip
         const url = tournamentUrl(parsed.tournamentSlug);
         const tournamentKeyVal = `${this.sourceName}:${url}`;
 
-        if (priorSeen(tournamentKeyVal)) continue;
-        pageHasNew = true;
+        if (priorSeen(tournamentKeyVal)) {
+          // Deck-level streak — see STOP_AFTER_PRIOR_SEEN_DECKS doc.
+          priorSeenStreak++;
+          if (priorSeenStreak >= STOP_AFTER_PRIOR_SEEN_DECKS) break pages;
+          continue;
+        }
+        priorSeenStreak = 0;
 
         const externalUrl = `https://lorcana.gg/decks/${e.slug}`;
         if (priorDecksSeen(deckExternalKey(this.sourceName, externalUrl))) continue;
@@ -233,13 +250,6 @@ export class LorcanaGgAdapter implements SourceAdapter {
         }
       }
 
-      // Early-exit: 2 consecutive pages with no new tournaments → done.
-      if (!pageHasNew) {
-        allSeenStreak++;
-        if (allSeenStreak >= STOP_AFTER_ALL_SEEN_PAGES) break;
-      } else {
-        allSeenStreak = 0;
-      }
       if (this.pending.size >= maxResults) break;
       if (entries.length < PAGE_SIZE) break;
     }
