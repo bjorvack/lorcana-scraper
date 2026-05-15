@@ -184,23 +184,28 @@ jobs:
           name: scrape-inputs
 
       - name: Restore inkdecks browser state
+        # D2: shared across shards. cf_clearance is good for any
+        # shard in the same ~30-min window, so the first shard that
+        # passes Turnstile saves a cookie all later shards can reuse.
+        # actions/cache key includes the workflow run id as the write
+        # path so we don't fight each other for writes; restore-keys
+        # falls back to the most recent shared state from a prior run.
         uses: actions/cache@v4
         with:
           path: .cache/inkdecks-state.json
-          # cf_clearance has ~30 min TTL. Per-shard cache for now;
-          # D2 will collapse to a shared key so any shard's solved
-          # Turnstile unlocks the rest.
-          key: inkdecks-state-shard-${{ matrix.shard }}-${{ github.run_id }}
+          key: inkdecks-state-shared-${{ github.run_id }}-${{ matrix.shard }}
           restore-keys: |
-            inkdecks-state-shard-${{ matrix.shard }}-
+            inkdecks-state-shared-
 
       - name: Restore inkdecks deck-content cache
+        # Deck content is content-addressable (per UUID) so sharing
+        # across shards just makes re-runs of older tournaments cheap.
         uses: actions/cache@v4
         with:
           path: .cache/inkdecks-decks
-          key: inkdecks-decks-shard-${{ matrix.shard }}-${{ github.run_id }}
+          key: inkdecks-decks-shared-${{ github.run_id }}-${{ matrix.shard }}
           restore-keys: |
-            inkdecks-decks-shard-${{ matrix.shard }}-
+            inkdecks-decks-shared-
 
       - name: Run pipeline (inkdecks.com shard ${{ matrix.shard }})
         run: |
