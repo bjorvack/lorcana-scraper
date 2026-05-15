@@ -167,6 +167,68 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  scrape-limitless:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # Limitless is a public REST API with a 50-req-per-5-min rate
+    # limit. Even a full backfill of ~70 tournaments × 1 standings
+    # call each stays under 15 min.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Restore http cache
+        uses: actions/cache@v4
+        with:
+          path: out/http-cache
+          # Standings are immutable; once cached, re-runs cost zero
+          # API budget for already-ingested tournaments.
+          key: http-cache-limitless-${{ needs.prepare.outputs.prior_tag }}
+          restore-keys: |
+            http-cache-limitless-
+
+      - name: Run pipeline (limitlesstcg.com)
+        run: |
+          args=()
+          max_t="${{ inputs.max_tournaments }}"
+          [ -n "$max_t" ] && args+=("--max-tournaments" "$max_t")
+          if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
+            args+=("--prior" "./prior/dataset.json")
+          fi
+          pnpm scrape:tournaments \
+            --cards ./cards/cards.json \
+            --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --sources limitlesstcg.com \
+            --max-decks-per-tournament 16 \
+            --min-players 8 \
+            --out ./out "${args[@]}"
+
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-limitless
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   scrape-inkdecks:
     needs: prepare
     runs-on: ubuntu-latest
@@ -266,7 +328,7 @@ jobs:
   merge:
     # Run even if some shards failed — we still want to publish whatever
     # partial data made it through. `prepare` is non-negotiable though.
-    needs: [prepare, scrape-lorcana-gg, scrape-inkdecks]
+    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-inkdecks]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:

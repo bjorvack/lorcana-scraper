@@ -25,6 +25,7 @@ import {
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "../sources/types.js";
 import { InkdecksAdapter } from "../sources/inkdecks.js";
+import { LimitlessAdapter } from "../sources/limitless.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
 import { normaliseKey } from "../resolve/normalise.js";
@@ -596,6 +597,20 @@ function applyAdapterOptions(
     onTournamentStart?: (a: { deckCount: number }) => void;
   },
 ): SourceAdapter {
+  if (adapter instanceof LimitlessAdapter) {
+    return new LimitlessAdapter({
+      priorSeen: opts.priorSeen,
+      priorDecksSeen: opts.priorDecksSeen,
+      maxResults: opts.maxResults,
+      minPlayers: opts.minPlayers,
+      maxDecksPerTournament: opts.maxDecksPerTournament,
+      requestSpacingMs: opts.requestSpacingMs,
+      cacheDir: opts.cacheDir,
+      onDeckFetched: opts.onDeckFetched,
+      onDeckScraped: opts.onDeckScraped,
+      onTournamentStart: opts.onTournamentStart,
+    });
+  }
   if (adapter instanceof LorcanaGgAdapter) {
     return new LorcanaGgAdapter({
       priorSeen: opts.priorSeen,
