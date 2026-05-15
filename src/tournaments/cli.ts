@@ -33,6 +33,8 @@ interface Args {
   maxPages: number | undefined;
   pageFrom: number | undefined;
   pageTo: number | undefined;
+  shardIndex: number | undefined;
+  shardCount: number | undefined;
   deckConcurrency: number | undefined;
   minPlayers: number | undefined;
   maxDecksPerTournament: number | undefined;
@@ -52,6 +54,8 @@ function parseArgs(argv: string[]): Args {
     maxPages: undefined,
     pageFrom: undefined,
     pageTo: undefined,
+    shardIndex: undefined,
+    shardCount: undefined,
     deckConcurrency: undefined,
     minPlayers: undefined,
     maxDecksPerTournament: undefined,
@@ -96,6 +100,12 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--page-to":
         a.pageTo = Number.parseInt(v(), 10);
+        break;
+      case "--shard-index":
+        a.shardIndex = Number.parseInt(v(), 10);
+        break;
+      case "--shard-count":
+        a.shardCount = Number.parseInt(v(), 10);
         break;
       case "--deck-concurrency":
         a.deckConcurrency = Number.parseInt(v(), 10);
@@ -185,6 +195,8 @@ function printUsage(): void {
       "  --max-pages <n>            Cap pagination depth",
       "  --page-from <n>            Only list pages >= N (shard; default: 1)",
       "  --page-to <n>              Only list pages <= N (shard; default: max-pages)",
+      "  --shard-index <i>          Hash-modulo shard index (0-based)",
+      "  --shard-count <n>          Total shards (use with --shard-index)",
       "  --deck-concurrency <n>     Parallel deck fetches per tournament (default: 1)",
       "  --min-players <n>          Skip tournaments below this player count",
       "  --max-decks-per-tournament <n>  Only fetch top-N decks per tournament",
@@ -233,6 +245,8 @@ export async function runTournamentsCli(argv = process.argv.slice(2)): Promise<v
       maxPages: args.maxPages,
       pageFrom: args.pageFrom,
       pageTo: args.pageTo,
+      shardIndex: args.shardIndex,
+      shardCount: args.shardCount,
       deckConcurrency: args.deckConcurrency,
       minPlayers: args.minPlayers,
       maxDecksPerTournament: args.maxDecksPerTournament,

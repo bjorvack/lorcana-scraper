@@ -55,6 +55,19 @@ export interface RunOptions {
   /** Shard: highest listing page to consider (inclusive). */
   readonly pageTo?: number;
   /**
+   * Hash-modulo sharding (A1). Each shard runs the full listing but
+   * only processes refs where `fnv1a(externalKey) mod shardCount ==
+   * shardIndex`. Auto-balances regardless of how many tournaments
+   * each source has — unlike page-range sharding, which assumed
+   * lorcana.gg's API page count and silently dropped half of
+   * inkdecks's archive.
+   *
+   * Default: no filtering (process all refs). Set both shardIndex
+   * (0-based) and shardCount (>=1) to enable.
+   */
+  readonly shardIndex?: number;
+  readonly shardCount?: number;
+  /**
    * Max tournaments per source per run (top of pagination). Default: unlimited.
    * Either a number (uniform cap) or a `{ name: N, default?: N }` map for
    * per-source caps. Useful when a slow adapter (e.g. inkdecks.com behind
@@ -182,9 +195,26 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     });
 
     process.stderr.write(`[${adapter.sourceName}] listing tournaments...\n`);
-    const refs = await ad.listTournaments({} as never); // context unused for v1
-    report.noteListing(adapter.sourceName, refs.length);
-    process.stderr.write(`[${adapter.sourceName}] listed ${refs.length} tournaments\n`);
+    const allRefs = await ad.listTournaments({} as never); // context unused for v1
+    report.noteListing(adapter.sourceName, allRefs.length);
+    process.stderr.write(`[${adapter.sourceName}] listed ${allRefs.length} tournaments\n`);
+
+    // Hash-modulo sharding (A1). With shardCount=N and shardIndex=i,
+    // we only own refs whose key hashes to bucket i. The hash is
+    // deterministic so the same ref always lands in the same shard
+    // (independent of listing order or pagination), guaranteeing
+    // every ref is owned by exactly one shard.
+    const shardCount = opts.shardCount ?? 1;
+    const shardIndex = opts.shardIndex ?? 0;
+    const refs =
+      shardCount > 1
+        ? allRefs.filter((r) => fnv1aBucket(r.tournamentKey, shardCount) === shardIndex)
+        : allRefs;
+    if (shardCount > 1) {
+      process.stderr.write(
+        `[${adapter.sourceName}] shard ${shardIndex}/${shardCount}: ${refs.length}/${allRefs.length} refs\n`,
+      );
+    }
 
     // No pipeline-level slice: each adapter already obeys `maxResults`
     // and — crucially — only counts NEW (un-seen) refs against that
@@ -341,6 +371,26 @@ function projectTournament(args: {
 /** sha256 of `sourceName|<source-specific id>`. Stable across runs. */
 function externalKey(sourceName: string, id: string): string {
   return createHash("sha256").update(`${sourceName}|${id}`).digest("hex");
+}
+
+/**
+ * FNV-1a 32-bit hash modulo `buckets`. Used for hash-modulo
+ * sharding — every shard runs the full listing, then keeps only
+ * refs whose key falls into its bucket. The hash is deterministic
+ * and uniformly distributed, so shards auto-balance regardless of
+ * source size or pagination order.
+ *
+ * Picked over `parseInt(key.slice(0, 8), 16) % n` because the
+ * upstream key may be sha256-hex (high entropy, this works fine)
+ * or, in the future, something else with lopsided prefix bits.
+ */
+export function fnv1aBucket(key: string, buckets: number): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % buckets;
 }
 
 function projectDeck(

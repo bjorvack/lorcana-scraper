@@ -149,14 +149,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Inkdecks lists ~32 pages of 10 tournaments. Eight shards
-        # × 4 pages each ≈ 32 pages of coverage; bump if the archive
-        # grows. Each shard caps its own NEW-tournament budget so
-        # the slowest shard stays well under the timeout.
+        # Hash-modulo sharding (A1): every shard lists the full
+        # archive, then keeps only refs whose key hashes to its
+        # bucket. Auto-balances regardless of archive size — bumping
+        # the matrix below scales linearly without re-thinking page
+        # ranges. Each shard's NEW-tournament cap keeps it well
+        # under the job timeout.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
       TOTAL_SHARDS: 8
-      PAGES_PER_SHARD: 4
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -201,15 +202,6 @@ jobs:
           restore-keys: |
             inkdecks-decks-shard-${{ matrix.shard }}-
 
-      - name: Compute page range
-        id: range
-        run: |
-          from=$(( ${{ matrix.shard }} * PAGES_PER_SHARD + 1 ))
-          to=$(( from + PAGES_PER_SHARD - 1 ))
-          echo "from=$from" >> "$GITHUB_OUTPUT"
-          echo "to=$to"     >> "$GITHUB_OUTPUT"
-          echo "shard ${{ matrix.shard }}: pages $from..$to"
-
       - name: Run pipeline (inkdecks.com shard ${{ matrix.shard }})
         run: |
           args=()
@@ -225,8 +217,8 @@ jobs:
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
             --sources inkdecks.com \
-            --page-from ${{ steps.range.outputs.from }} \
-            --page-to   ${{ steps.range.outputs.to }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ env.TOTAL_SHARDS }} \
             --max-decks-per-tournament 16 \
             --persist-every 5 \
             --out ./out "${args[@]}"
