@@ -56,12 +56,38 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           mkdir -p cards
           gh release download "$tag" --repo bjorvack/lorcana-scraper -p cards.json -D cards
+      # C2 in-progress snapshot: a cache populated at the end of
+      # every `merge` job, even when no release was cut. Restores
+      # here so a run that crashed-or-no-changed still feeds its
+      # progress forward to the next run. Falls through to the
+      # released `tournaments-vN` if no snapshot is cached.
+      - name: Restore in-progress merged snapshot (C2)
+        id: snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: snapshot/
+          # Restore-only: the matching `cache/save` step in `merge`
+          # writes the new snapshot with the run id appended, so this
+          # always picks up the freshest previous run via the
+          # restore-keys prefix.
+          key: scrape-merged-snapshot-restore-only
+          restore-keys: |
+            scrape-merged-snapshot-
       - name: Download latest tournaments-vN (prior)
         id: prior
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p prior
+          # Prefer the in-progress snapshot if it's present *and*
+          # parses — it's strictly newer than the latest release.
+          if [ -f snapshot/dataset.json ]; then
+            cp snapshot/dataset.json prior/dataset.json
+            echo "Using C2 in-progress snapshot for prior"
+            echo "tag=snapshot" >> "$GITHUB_OUTPUT"
+            echo "have_prior=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           tag=$(gh release list \
             --repo bjorvack/lorcana-scraper \
             --limit 50 --json tagName -q '.[].tagName' \
@@ -338,6 +364,21 @@ jobs:
           name: ${{ steps.tagname.outputs.tag || format('scrape-{0}', github.run_id) }}
           path: out/
           retention-days: 30
+
+      # C2: save the merged dataset.json as a snapshot the next
+      # run's `prepare` will pick up via restore-keys. Saved on
+      # every merge, including no-change runs, so progress always
+      # carries forward — even when we couldn't publish a release.
+      - name: Stage snapshot directory
+        run: |
+          mkdir -p snapshot
+          cp ./out/dataset.json snapshot/dataset.json
+      - name: Save in-progress merged snapshot (C2)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: snapshot/
+          key: scrape-merged-snapshot-${{ github.run_id }}
 
       - name: Publish release
         if: steps.changed.outputs.changed == '1' || inputs.force_publish == true
