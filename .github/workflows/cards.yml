@@ -15,6 +15,13 @@ permissions:
   contents: write
   packages: read
 
+# Silence the "Node.js 20 actions are deprecated" warning emitted
+# for the bundled JavaScript actions (actions/checkout, actions/cache,
+# pnpm/action-setup, …). Forces those actions to run on the runner's
+# Node 24 ahead of GitHub making it the default in June 2026.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   cards:
     runs-on: ubuntu-latest
@@ -24,7 +31,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           registry-url: https://npm.pkg.github.com
           scope: "@bjorvack"
