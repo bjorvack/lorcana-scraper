@@ -276,10 +276,13 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     const limited = refs;
     progress.setTournamentsTotal(limited.length);
 
-    // Default to persisting after every tournament so a crash/SIGINT mid-run
-    // loses at most one tournament's work. Override with --persist-every if
-    // disk write overhead matters more than crash safety.
-    const persistEvery = opts.persistEvery ?? 1;
+    // F1: per-tournament atomic writes (B1) and streaming-deck
+    // persistence (B2) are now the crash-safety mechanism. The
+    // periodic dataset.json snapshot is mostly redundant — keep
+    // it for back-compat with `--persist-every <n>`, but the
+    // default is 0 (off). With it off, the only dataset.json
+    // write is at end-of-run.
+    const persistEvery = opts.persistEvery ?? 0;
     let i = 0;
     for (const ref of limited) {
       i++;

@@ -156,7 +156,6 @@ jobs:
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
             --sources lorcana.gg \
             --max-decks-per-tournament 16 \
-            --persist-every 5 \
             --out ./out "${args[@]}"
 
       - name: Upload shard artifact
@@ -251,7 +250,6 @@ jobs:
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ env.TOTAL_SHARDS }} \
             --max-decks-per-tournament 16 \
-            --persist-every 5 \
             --out ./out "${args[@]}"
 
       # Always upload — per-tournament files (B1) on disk are the
