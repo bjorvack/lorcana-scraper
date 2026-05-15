@@ -135,6 +135,20 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   const priorKeys = new Set((prior?.tournaments ?? []).map(tournamentKeyOf));
   const priorSeen = (k: string): boolean => priorKeys.has(k);
 
+  // Deck-level seen-set (D1). Adapters consult this before fetching
+  // deck content; if the prospective key (sha256(sourceName|url))
+  // matches an already-ingested deck, the adapter can short-circuit
+  // the deck fetch. Mostly helps when the same deck slug appears in
+  // more than one tournament listing, and lays the groundwork for B2
+  // / mid-tournament partial-resume.
+  const priorDeckKeys = new Set<string>();
+  for (const t of prior?.tournaments ?? []) {
+    for (const entry of t.decks) {
+      if (entry.deck.externalKey) priorDeckKeys.add(entry.deck.externalKey);
+    }
+  }
+  const priorDecksSeen = (k: string): boolean => priorDeckKeys.has(k);
+
   const enabled = opts.sources
     ? adapters.filter((a) => opts.sources!.includes(a.sourceName))
     : adapters;
@@ -179,6 +193,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     // Re-instantiate adapters that accept run-time options.
     const ad = applyAdapterOptions(adapter, {
       priorSeen,
+      priorDecksSeen,
       maxPages: opts.maxPages,
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
@@ -482,6 +497,7 @@ function applyAdapterOptions(
   adapter: SourceAdapter,
   opts: {
     priorSeen?: (k: string) => boolean;
+    priorDecksSeen?: (k: string) => boolean;
     maxPages?: number;
     pageFrom?: number;
     pageTo?: number;
@@ -498,6 +514,7 @@ function applyAdapterOptions(
   if (adapter instanceof LorcanaGgAdapter) {
     return new LorcanaGgAdapter({
       priorSeen: opts.priorSeen,
+      priorDecksSeen: opts.priorDecksSeen,
       maxPages: opts.maxPages,
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
@@ -514,6 +531,7 @@ function applyAdapterOptions(
   if (adapter instanceof InkdecksAdapter) {
     return new InkdecksAdapter({
       priorSeen: opts.priorSeen,
+      priorDecksSeen: opts.priorDecksSeen,
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
       maxPages: opts.maxPages,

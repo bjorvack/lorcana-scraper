@@ -15,6 +15,7 @@
  * pipeline's card index resolves them deterministically against the
  * pinned `cards-vN`.
  */
+import { createHash } from "node:crypto";
 import { fetch } from "undici";
 import { HttpCache } from "./httpCache.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./types.js";
@@ -134,6 +135,15 @@ export interface LorcanaGgOptions {
    * Used by the orchestrator to make incremental runs fast.
    */
   readonly priorSeen?: (tournamentKey: string) => boolean;
+  /**
+   * Deck-level skip predicate (D1). The adapter computes the
+   * prospective `Deck.externalKey` from `(sourceName, deck slug
+   * URL)` BEFORE fetching deck content; if `priorDecksSeen(key)`
+   * is true we skip the fetch entirely. The orchestrator's E1 merge
+   * fills the prior copy back in on the way out, so net effect is
+   * "don't re-download decks we already have".
+   */
+  readonly priorDecksSeen?: (deckExternalKey: string) => boolean;
   /**
    * Short-circuit pagination once `listTournaments` has gathered this many
    * not-yet-seen refs. Helpful for dev runs ("just fetch me a couple").
@@ -292,6 +302,13 @@ export class LorcanaGgAdapter implements SourceAdapter {
 
   private async standingToRawDeck(s: StandingEntry): Promise<RawDeck | null> {
     if (!s.slug) return null;
+    // D1: skip the network round-trip if we already have this deck
+    // in the prior dataset. The pipeline's E1 merge will re-attach
+    // the prior copy so the resulting tournament is unchanged.
+    const externalUrl = `https://lorcana.gg/decks/${s.slug}`;
+    if (this.opts.priorDecksSeen?.(deckExternalKey(this.sourceName, externalUrl))) {
+      return null;
+    }
     const deck = await this.fetchDeck(s.slug);
     if (!deck) return null;
     const cards: { rawName: string; count: number }[] = [];
@@ -396,6 +413,15 @@ export const lorcanaGg = new LorcanaGgAdapter();
 
 export function tournamentKey(sourceName: string, slug: string): string {
   return `${sourceName}:${slug}`;
+}
+
+/**
+ * Same formula the pipeline uses to stamp `Deck.externalKey` —
+ * sha256(`<sourceName>|<externalUrl>`). Adapters call this BEFORE
+ * fetching to consult `priorDecksSeen` (D1).
+ */
+export function deckExternalKey(sourceName: string, externalUrl: string): string {
+  return createHash("sha256").update(`${sourceName}|${externalUrl}`).digest("hex");
 }
 
 export function tournamentUrl(slug: string): string {

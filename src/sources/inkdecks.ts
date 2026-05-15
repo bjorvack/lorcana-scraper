@@ -83,6 +83,12 @@ export interface InkdecksAdapterOptions {
    *  source has ``maxResults`` tournaments in the prior we'd never
    *  reach the tail and the backfill would stall. */
   readonly priorSeen?: (tournamentKey: string) => boolean;
+  /** Deck-level skip (D1). The adapter computes the prospective
+   *  ``Deck.externalKey`` from ``(sourceName, deck detail URL)``
+   *  before fetching the deck page. If ``priorDecksSeen`` returns
+   *  true we drop the deck without hitting the network; the
+   *  orchestrator's E1 merge re-attaches the prior copy. */
+  readonly priorDecksSeen?: (deckExternalKey: string) => boolean;
   /** Cap on the number of NEW (un-seen) tournaments emitted per
    *  run. Pagination stops as soon as this many fresh refs have
    *  been collected. Prior-seen refs are skipped without consuming
@@ -112,6 +118,15 @@ export interface InkdecksAdapterOptions {
 
 function tournamentKey(sourceUrl: string): string {
   return createHash("sha256").update(`${SOURCE_NAME}|${sourceUrl}`).digest("hex");
+}
+
+/**
+ * Same formula the pipeline uses to stamp `Deck.externalKey`. The
+ * adapter calls this before fetching deck content so D1's
+ * `priorDecksSeen` can short-circuit known decks.
+ */
+function deckExternalKey(sourceName: string, externalUrl: string): string {
+  return createHash("sha256").update(`${sourceName}|${externalUrl}`).digest("hex");
 }
 
 function titleInk(s: string): string {
@@ -266,6 +281,14 @@ export class InkdecksAdapter implements SourceAdapter {
       try {
         while (queue.length > 0) {
           const row = queue.shift()!;
+          // D1: skip refetching decks the prior dataset already has.
+          // We compute the prospective Deck.externalKey from the
+          // deck detail URL we already extracted from the row, so
+          // no navigation is required.
+          if (this.#opts.priorDecksSeen?.(deckExternalKey(SOURCE_NAME, row.href))) {
+            this.#opts.onDeckFetched?.({ resolved: false, failed: false });
+            continue;
+          }
           try {
             const deck = await this.#fetchDeck(wp, row);
             if (deck) decks.push(deck);
