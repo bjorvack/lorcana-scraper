@@ -325,19 +325,34 @@ jobs:
       - name: Detect changes vs prior
         id: changed
         run: |
+          # E2: publish when *either* new tournaments OR new decks
+          # landed since the prior release. The deck delta matters
+          # because B2 + E1 let a tournament gain more decks between
+          # runs — without counting them we'd never cut a release
+          # for "we finished scraping the rest of that tournament".
           if [ -f ./prior/dataset.json ]; then
-            prior_n=$(jq '.tournaments | length' ./prior/dataset.json)
+            prior_t=$(jq '.tournaments | length' ./prior/dataset.json)
+            prior_d=$(jq '[.tournaments[].decks | length] | add // 0' ./prior/dataset.json)
           else
-            prior_n=0
+            prior_t=0
+            prior_d=0
           fi
-          new_n=$(jq '.tournaments | length' ./out/dataset.json)
-          echo "prior=$prior_n" >> "$GITHUB_OUTPUT"
-          echo "new=$new_n"     >> "$GITHUB_OUTPUT"
-          if [ "$new_n" -gt "$prior_n" ]; then
+          new_t=$(jq '.tournaments | length' ./out/dataset.json)
+          new_d=$(jq '[.tournaments[].decks | length] | add // 0' ./out/dataset.json)
+          echo "prior_t=$prior_t" >> "$GITHUB_OUTPUT"
+          echo "prior_d=$prior_d" >> "$GITHUB_OUTPUT"
+          echo "new_t=$new_t"     >> "$GITHUB_OUTPUT"
+          echo "new_d=$new_d"     >> "$GITHUB_OUTPUT"
+          # Legacy aliases for older release-notes templates.
+          echo "prior=$prior_t" >> "$GITHUB_OUTPUT"
+          echo "new=$new_t"     >> "$GITHUB_OUTPUT"
+          if [ "$new_t" -gt "$prior_t" ] || [ "$new_d" -gt "$prior_d" ]; then
             echo "changed=1" >> "$GITHUB_OUTPUT"
           else
             echo "changed=0" >> "$GITHUB_OUTPUT"
           fi
+          echo "tournaments: $prior_t -> $new_t  (+$((new_t - prior_t)))"
+          echo "decks:       $prior_d -> $new_d  (+$((new_d - prior_d)))"
 
       - name: Compute next tournaments-v tag
         if: steps.changed.outputs.changed == '1' || inputs.force_publish == true
@@ -390,11 +405,15 @@ jobs:
           n_decks=$(jq '[.tournaments[].decks | length] | add // 0' ./out/dataset.json)
           rate=$(jq -r '(.totalFailureRate * 100) | . * 100 | floor | . / 100 | tostring + "%"' ./out/resolution-report.json)
           card_set_v=$(jq -r .cardSetVersion ./out/dataset.json)
+          # Deltas vs prior for the release notes (E2). New decks
+          # alone can trigger a release now, so surface both numbers.
+          delta_t=$(( ${{ steps.changed.outputs.new_t }} - ${{ steps.changed.outputs.prior_t }} ))
+          delta_d=$(( ${{ steps.changed.outputs.new_d }} - ${{ steps.changed.outputs.prior_d }} ))
           {
             echo "## $tag"
             echo
-            echo "Tournaments: **$n_tournaments**"
-            echo "Decks: **$n_decks**"
+            echo "Tournaments: **$n_tournaments** (+$delta_t)"
+            echo "Decks: **$n_decks** (+$delta_d)"
             echo "Resolution failure rate: $rate"
             echo
             echo "Pinned cards snapshot: \`${{ needs.prepare.outputs.cards_tag }}\`"
