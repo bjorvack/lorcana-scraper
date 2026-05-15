@@ -83,6 +83,14 @@ export interface InkdecksAdapterOptions {
    *  source has ``maxResults`` tournaments in the prior we'd never
    *  reach the tail and the backfill would stall. */
   readonly priorSeen?: (tournamentKey: string) => boolean;
+  /** D3: per-shard startup stagger in ms. With hash-modulo sharding
+   *  (A1) every shard walks the listing in the same date-desc order,
+   *  hitting page 1 simultaneously and tripping Cloudflare's burst
+   *  limit. Sleeping `shardIndex * staggerMs` at the start lets
+   *  earlier shards establish their cf_clearance cookies before
+   *  later shards arrive — and combined with D2's shared cookie
+   *  cache, later shards often skip Turnstile altogether. */
+  readonly startupStaggerMs?: number;
   /** Deck-level skip (D1). The adapter computes the prospective
    *  ``Deck.externalKey`` from ``(sourceName, deck detail URL)``
    *  before fetching the deck page. If ``priorDecksSeen`` returns
@@ -167,6 +175,11 @@ export class InkdecksAdapter implements SourceAdapter {
   }
 
   async listTournaments(_ctx: ScrapeContext): Promise<TournamentRef[]> {
+    // D3: stagger shards so they don't all hammer page 1 at the
+    // same instant. No-op when run as a single process locally.
+    if (this.#opts.startupStaggerMs && this.#opts.startupStaggerMs > 0) {
+      await sleep(this.#opts.startupStaggerMs);
+    }
     let page: Page;
     try {
       page = await this.#ensurePage();

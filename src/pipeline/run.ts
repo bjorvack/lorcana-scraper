@@ -228,6 +228,8 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       maxPages: opts.maxPages,
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
+      shardIndex: opts.shardIndex,
+      shardCount: opts.shardCount,
       deckConcurrency: opts.deckConcurrency,
       maxResults: sourceCap,
       minPlayers: opts.minPlayers,
@@ -541,6 +543,8 @@ function applyAdapterOptions(
     maxPages?: number;
     pageFrom?: number;
     pageTo?: number;
+    shardIndex?: number;
+    shardCount?: number;
     deckConcurrency?: number;
     maxResults?: number;
     minPlayers?: number;
@@ -579,6 +583,10 @@ function applyAdapterOptions(
       maxPages: opts.maxPages,
       maxResults: opts.maxResults,
       deckConcurrency: opts.deckConcurrency,
+      // D3: stagger shards by 8s per index. Shard 0 starts immediately,
+      // shard 7 sleeps 56s. D2's shared cf_clearance cache means later
+      // shards usually find a fresh cookie waiting for them.
+      startupStaggerMs: opts.shardCount && opts.shardCount > 1 ? (opts.shardIndex ?? 0) * 8_000 : 0,
       onTournamentStart: opts.onTournamentStart,
       onDeckFetched: opts.onDeckFetched,
       onDeckScraped: opts.onDeckScraped,
