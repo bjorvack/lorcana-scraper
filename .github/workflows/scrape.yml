@@ -1,15 +1,20 @@
 name: scrape
 
-# Scheduled tournaments-vN refresh, sharded.
+# Scheduled tournaments-vN refresh.
 #
-# The listing endpoint has ~57 pages of tournaments. To split the
-# Cloudflare 1015 rate-limit budget across multiple egress IPs, we run
-# N parallel shards (each on its own GitHub Actions runner) that scrape
-# disjoint page ranges. A final `merge` job combines the shard outputs
-# into a single dataset, validates, and publishes the release.
+# Per-source split (A2):
+#   prepare           — resolve pinned cards-vN + latest tournaments-vN
+#   scrape-lorcana-gg — single runner, HTTP-only, ~5-10 min
+#   scrape-inkdecks   — N-shard matrix, chromium + Turnstile, slow
+#   merge             — stitch all shard artifacts into one dataset
 #
-# Resume / dedup is handled by each shard passing the latest
-# tournaments-vN as `--prior` so already-known tournaments are skipped.
+# A Cloudflare 1015 on one source can't kill the other. lorcana.gg
+# never wastes a chromium install. inkdecks shards run independently;
+# fail-fast is off so one Turnstile bail doesn't take the rest down.
+#
+# Per-tournament artifact files (B1) mean a shard that dies still
+# contributes every tournament it had already finished — the merge
+# step picks up whatever is on disk.
 
 on:
   schedule:
@@ -78,20 +83,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-  scrape:
+  scrape-lorcana-gg:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 340
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-    env:
-      # Total shards and the listing page range each shard owns. Keep
-      # PAGES_PER_SHARD * TOTAL_SHARDS >= real page count (~60) or the
-      # tail shard will miss pages.
-      TOTAL_SHARDS: 4
-      PAGES_PER_SHARD: 16
+    # lorcana.gg is pure HTTP — even a worst-case backfill plus an
+    # adaptive Cloudflare 1015 cooldown stays well under an hour.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -107,11 +104,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install chromium for inkdecks adapter
-        run: |
-          pnpm exec playwright install chromium --with-deps || \
-            npx -y playwright@1.60 install chromium --with-deps
-
       - name: Download scrape inputs
         uses: actions/download-artifact@v4
         with:
@@ -121,18 +113,82 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/http-cache
-          # Per-shard cache key so shards don't clobber each other.
-          key: http-cache-shard-${{ matrix.shard }}-${{ needs.prepare.outputs.prior_tag }}
+          key: http-cache-lorcana-gg-${{ needs.prepare.outputs.prior_tag }}
           restore-keys: |
-            http-cache-shard-${{ matrix.shard }}-
+            http-cache-lorcana-gg-
 
-      - name: Restore inkdecks browser state (cf_clearance cookie)
+      - name: Run pipeline (lorcana.gg)
+        run: |
+          args=()
+          max_t="${{ inputs.max_tournaments }}"
+          [ -n "$max_t" ] && args+=("--max-tournaments" "$max_t")
+          if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
+            args+=("--prior" "./prior/dataset.json")
+          fi
+          pnpm scrape:tournaments \
+            --cards ./cards/cards.json \
+            --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --sources lorcana.gg \
+            --max-decks-per-tournament 16 \
+            --persist-every 5 \
+            --out ./out "${args[@]}"
+
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-lorcana-gg
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  scrape-inkdecks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Inkdecks lists ~32 pages of 10 tournaments. Eight shards
+        # × 4 pages each ≈ 32 pages of coverage; bump if the archive
+        # grows. Each shard caps its own NEW-tournament budget so
+        # the slowest shard stays well under the timeout.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      TOTAL_SHARDS: 8
+      PAGES_PER_SHARD: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install chromium
+        run: |
+          pnpm exec playwright install chromium --with-deps || \
+            npx -y playwright@1.60 install chromium --with-deps
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Restore inkdecks browser state
         uses: actions/cache@v4
         with:
           path: .cache/inkdecks-state.json
-          # The Cloudflare clearance cookie has roughly a 30-minute
-          # TTL but we keep the storage state per shard anyway — even
-          # an expired cookie speeds up the next challenge.
+          # cf_clearance has ~30 min TTL. Per-shard cache for now;
+          # D2 will collapse to a shared key so any shard's solved
+          # Turnstile unlocks the rest.
           key: inkdecks-state-shard-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
             inkdecks-state-shard-${{ matrix.shard }}-
@@ -141,10 +197,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/inkdecks-decks
-          # Each ``/decks/export/<uuid>/txt`` is content-addressable —
-          # a stable cookie has no bearing on what we extract — so the
-          # cache key is just the shard. Cache grows monotonically;
-          # GitHub will evict the oldest entries when it gets full.
           key: inkdecks-decks-shard-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
             inkdecks-decks-shard-${{ matrix.shard }}-
@@ -158,13 +210,11 @@ jobs:
           echo "to=$to"     >> "$GITHUB_OUTPUT"
           echo "shard ${{ matrix.shard }}: pages $from..$to"
 
-      - name: Run pipeline (shard ${{ matrix.shard }})
+      - name: Run pipeline (inkdecks.com shard ${{ matrix.shard }})
         run: |
           args=()
           # Per-source caps. inkdecks.com is slow (Cloudflare Turnstile +
-          # headless chromium) and ate the full 6h timeout on the first
-          # backfill run; cap it so the shard always finishes. lorcana.gg
-          # is fast — let the priorSeen short-circuit handle dedup.
+          # headless chromium); cap so each shard always finishes.
           max_t="${{ inputs.max_tournaments }}"
           [ -z "$max_t" ] && max_t="inkdecks.com=40"
           args+=("--max-tournaments" "$max_t")
@@ -174,31 +224,28 @@ jobs:
           pnpm scrape:tournaments \
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --sources inkdecks.com \
             --page-from ${{ steps.range.outputs.from }} \
             --page-to   ${{ steps.range.outputs.to }} \
             --max-decks-per-tournament 16 \
             --persist-every 5 \
             --out ./out "${args[@]}"
 
-      # `if: always()` — the pipeline persists dataset.json every 5
-      # tournaments, so even a shard that dies from a Cloudflare 1015
-      # rate-limit exhaustion still has useful partial data on disk.
-      # Always ship it; the merge job will stitch together whatever
-      # made it through.
+      # Always upload — per-tournament files (B1) on disk are the
+      # source of truth; the merge job picks up whatever made it.
       - name: Upload shard artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-${{ matrix.shard }}
+          name: shard-inkdecks-${{ matrix.shard }}
           path: out/
           retention-days: 7
           if-no-files-found: ignore
 
   merge:
     # Run even if some shards failed — we still want to publish whatever
-    # partial data made it through. `prepare` is non-negotiable though
-    # (without cards.json + prior we have nothing to merge against).
-    needs: [prepare, scrape]
+    # partial data made it through. `prepare` is non-negotiable though.
+    needs: [prepare, scrape-lorcana-gg, scrape-inkdecks]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
