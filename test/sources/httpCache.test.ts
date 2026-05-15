@@ -29,4 +29,24 @@ describe("HttpCache", () => {
     expect(await cache.get<{ v: string }>("https://example.test/a")).toEqual({ v: "a" });
     expect(await cache.get<{ v: string }>("https://example.test/b")).toEqual({ v: "b" });
   });
+
+  it("C1: getWithinTtl returns null when the entry is older than maxAgeMs", async () => {
+    const cache = new HttpCache(dir);
+    const url = "https://example.test/ttl";
+    await cache.set(url, { v: "fresh" });
+    // 0 ms TTL → always expired.
+    expect(await cache.getWithinTtl<{ v: string }>(url, 0)).toBeNull();
+    // 1 hour TTL → entry is well within it.
+    expect(await cache.getWithinTtl<{ v: string }>(url, 60 * 60_000)).toEqual({ v: "fresh" });
+  });
+
+  it("C1: getWithinTtl tolerates legacy non-envelope entries (treats as fresh)", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { createHash } = await import("node:crypto");
+    const url = "https://example.test/legacy";
+    const hash = createHash("sha1").update(url).digest("hex");
+    writeFileSync(join(dir, `${hash}.json`), JSON.stringify({ legacy: true }), "utf8");
+    const cache = new HttpCache(dir);
+    expect(await cache.getWithinTtl<{ legacy: boolean }>(url, 0)).toEqual({ legacy: true });
+  });
 });

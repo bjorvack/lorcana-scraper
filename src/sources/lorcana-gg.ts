@@ -365,12 +365,21 @@ export class LorcanaGgAdapter implements SourceAdapter {
   }
 
   private async getJson<T>(url: string, fallback?: T): Promise<T> {
-    // Only cache individual tournament + deck endpoints; listing pages are
-    // mutable as new tournaments appear.
-    const cacheable =
+    // Immutable endpoints (finalized tournaments + decks): cache
+    // forever. Listing pages get a 15-minute TTL via getWithinTtl so
+    // rapid re-runs hit cache without serving stale data forever.
+    const immutableCacheable =
       this.cache !== null && (url.includes("/gettournament?") || url.includes("/getdeck?"));
-    if (cacheable) {
+    const listingCacheable = this.cache !== null && url.includes("/gettournaments?");
+    if (immutableCacheable) {
       const cached = await this.cache!.get<T>(url);
+      if (cached !== null) return cached;
+    } else if (listingCacheable) {
+      // C1: 15-min TTL on listing pages. Short enough that "I just
+      // released a tournament" still gets picked up next hour; long
+      // enough that re-running locally during dev costs zero
+      // Cloudflare budget.
+      const cached = await this.cache!.getWithinTtl<T>(url, 15 * 60_000);
       if (cached !== null) return cached;
     }
     let lastErr: unknown;
@@ -409,7 +418,7 @@ export class LorcanaGgAdapter implements SourceAdapter {
         }
         if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
         const parsed = (await res.json()) as T;
-        if (cacheable) await this.cache!.set(url, parsed);
+        if (immutableCacheable || listingCacheable) await this.cache!.set(url, parsed);
         return parsed;
       } catch (err) {
         lastErr = err;
