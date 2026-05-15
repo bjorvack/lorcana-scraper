@@ -274,8 +274,15 @@ export async function runTournamentsCli(argv = process.argv.slice(2)): Promise<v
 
 const isDirectRun = import.meta.url === `file://${process.argv[1]}`;
 if (isDirectRun) {
-  runTournamentsCli().catch((err) => {
-    process.stderr.write(`unexpected error: ${err instanceof Error ? err.stack : String(err)}\n`);
-    process.exit(1);
-  });
+  // Force exit when the CLI returns successfully. Even after every
+  // adapter has been .close()'d, undici's connection pool and
+  // playwright's IPC channels can keep the event loop alive for a
+  // few extra seconds; this prevents the CI runner from waiting on
+  // those out-of-band handles for the full job timeout.
+  runTournamentsCli()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      process.stderr.write(`unexpected error: ${err instanceof Error ? err.stack : String(err)}\n`);
+      process.exit(1);
+    });
 }

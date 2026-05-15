@@ -184,6 +184,14 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   // Re-written at end of run with the final generatedAt timestamp.
   writeShardMeta({ opts, cards, enabled });
 
+  // Adapters we instantiated (and therefore must close at end of run).
+  // Without this the InkdecksAdapter leaves a headless chromium child
+  // process running forever, keeping node alive even after the
+  // pipeline returned successfully — that's the "stuck on writing
+  // dataset.json" symptom: the message printed, then the process sat
+  // on open subprocess handles for the rest of the job timeout.
+  const liveAdapters: { close?: () => Promise<void> }[] = [];
+
   for (const adapter of enabled) {
     report.startSource(adapter.sourceName);
     progress.startSource(adapter.sourceName);
@@ -246,6 +254,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       },
       onTournamentStart: (a) => progress.setCurrentTournamentDeckCount(a.deckCount),
     });
+    liveAdapters.push(ad as unknown as { close?: () => Promise<void> });
 
     process.stderr.write(`[${adapter.sourceName}] listing tournaments...\n`);
     const allRefs = await ad.listTournaments({} as never); // context unused for v1
@@ -392,6 +401,19 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     shardCount: opts.shardCount,
     report: finalReport,
   });
+
+  // Close adapters before returning so node can exit cleanly.
+  // Without this, InkdecksAdapter leaks a headless chromium child
+  // process and the runner waits the full job timeout for it.
+  for (const a of liveAdapters) {
+    if (typeof a.close === "function") {
+      try {
+        await a.close();
+      } catch (err) {
+        process.stderr.write(`[adapter.close] ${(err as Error).message}\n`);
+      }
+    }
+  }
 
   return {
     datasetPath: written.datasetPath,
