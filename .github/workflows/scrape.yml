@@ -228,13 +228,16 @@ jobs:
 
       - name: Merge shards
         run: |
-          # nullglob: if no shard produced a dataset.json, the array is empty
-          # instead of containing the literal glob pattern.
+          # nullglob: if no shard artifact landed, the array is empty
+          # instead of expanding to the literal glob pattern. We pass
+          # shard *directories* (B1) so the merge step picks up the
+          # per-tournament files regardless of whether a shard managed
+          # to flush a dataset.json snapshot before dying.
           shopt -s nullglob
-          shards=(shards/*/dataset.json)
+          shards=(shards/shard-*)
           echo "merging ${#shards[@]} shard(s): ${shards[*]:-<none>}"
           if [ ${#shards[@]} -eq 0 ]; then
-            echo "::error::No shard produced a dataset.json — nothing to merge."
+            echo "::error::No shard artifact found — nothing to merge."
             exit 1
           fi
           pnpm tournaments:merge-shards \

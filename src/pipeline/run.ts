@@ -10,7 +10,7 @@
  *   write artifacts
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   CardSet,
@@ -37,6 +37,7 @@ import { mergeTournaments, tournamentKeyOf } from "./merge.js";
 import { ReportBuilder } from "./report.js";
 import { writeTournamentsArtifacts } from "./release.js";
 import { ProgressReporter } from "./progress.js";
+import { writeFailedTournament, writeTournamentFile } from "./tournamentStore.js";
 
 export interface RunOptions {
   /** Path to the pinned cards-vN cards.json. */
@@ -150,6 +151,11 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
 
+  // Pre-write a minimal meta.json so the merge job can pick up shard
+  // metadata even if this run dies before any tournament finishes.
+  // Re-written at end of run with the final generatedAt timestamp.
+  writeShardMeta({ opts, cards, enabled });
+
   for (const adapter of enabled) {
     report.startSource(adapter.sourceName);
     progress.startSource(adapter.sourceName);
@@ -212,12 +218,38 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
         if (tournament) {
           added.push(tournament);
           report.noteTournamentKept(adapter.sourceName);
+          // Per-tournament atomic write. Survives crashes / SIGKILL /
+          // runner timeouts: whatever we've ingested so far is on disk
+          // before we move on to the next ref. The merge job globs
+          // these across shards.
+          try {
+            writeTournamentFile(outDirAbs, tournament);
+          } catch (writeErr) {
+            // Don't fail the whole run on a single bad write; the
+            // periodic dataset.json snapshot is still a backstop.
+            process.stderr.write(
+              `  ! writeTournamentFile failed for ${ref.tournamentKey}: ${(writeErr as Error).message}\n`,
+            );
+          }
         }
       } catch (err) {
         // Single-tournament failures are surfaced but don't fail the run.
         const msg = (err as Error).message;
         console.warn(`  ! ${adapter.sourceName} ${ref.tournamentKey}: ${msg}`);
         progress.noteError(msg);
+        // Record the failure so re-runs / triage can see what blew up
+        // even when no dataset.json snapshot was taken yet.
+        try {
+          writeFailedTournament(outDirAbs, {
+            externalKey: ref.tournamentKey,
+            sourceName: adapter.sourceName,
+            sourceUrl: ref.sourceUrl,
+            attemptedAt: new Date().toISOString(),
+            error: msg,
+          });
+        } catch {
+          /* best-effort */
+        }
       }
       progress.endTournament();
       process.stderr.write(`  ${progress.oneLine()}\n`);
@@ -506,6 +538,34 @@ function writePartial(args: {
     report: report.build(),
     affectedDecks: report.affectedDecks(),
   });
+}
+
+/**
+ * Persist `<outDir>/meta.json` — the minimum the merge job needs to
+ * stitch this shard into the final dataset, even if zero tournaments
+ * have finished yet. Idempotent: safe to call repeatedly.
+ */
+function writeShardMeta(args: {
+  opts: RunOptions;
+  cards: CardSetT;
+  enabled: readonly SourceAdapter[];
+}): void {
+  const { opts, cards, enabled } = args;
+  const outDirAbs = resolve(process.cwd(), opts.outDir);
+  try {
+    mkdirSync(outDirAbs, { recursive: true });
+    const meta = {
+      datasetVersion: opts.datasetMeta.datasetVersion,
+      schemaVersion: opts.datasetMeta.schemaVersion,
+      cardSetVersion: cards.cardSetVersion,
+      cardsReleaseTag: opts.datasetMeta.cardsReleaseTag,
+      generatedAt: new Date().toISOString(),
+      sources: enabled.map((a) => a.sourceName),
+    };
+    writeFileSync(resolve(outDirAbs, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
+  } catch (err) {
+    process.stderr.write(`[shard-meta] write failed: ${(err as Error).message}\n`);
+  }
 }
 
 function loadCards(path: string): CardSetT {
