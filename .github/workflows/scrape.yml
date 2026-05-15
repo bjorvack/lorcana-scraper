@@ -299,9 +299,8 @@ jobs:
         run: |
           # E3: every shard writes a summary.json (F2). Stitch
           # them into a markdown table so the release notes show
-          # who did what. Uses bash heredoc so it survives ${{ }}
-          # quoting; output stored as a single multi-line GHA
-          # output variable.
+          # who did what. Bash heredoc keeps the GHA template
+          # syntax happy; output stored as a multi-line GHA output.
           shopt -s nullglob
           summaries=(shards/shard-*/summary.json)
           {
