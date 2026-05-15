@@ -169,6 +169,11 @@ export class InkdecksAdapter implements SourceAdapter {
   #context: BrowserContext | null = null;
   #page: Page | null = null;
   #challengeStreak = 0;
+  // D4 adaptive concurrency state. Mutated from `#fetchDeck` /
+  // `#navigate` as Cloudflare's mood swings.
+  #activeBudget = DEFAULT_DECK_CONCURRENCY;
+  #concurrencyCeiling = DEFAULT_DECK_CONCURRENCY;
+  #successStreak = 0;
 
   constructor(opts: InkdecksAdapterOptions = {}) {
     this.#opts = opts;
@@ -288,20 +293,35 @@ export class InkdecksAdapter implements SourceAdapter {
     // sharing the cf_clearance cookie. Each worker pulls the next
     // row off a shared queue. Output order is intentionally
     // unspecified — the orchestrator sorts/dedupes downstream.
-    const concurrency = Math.max(1, this.#opts.deckConcurrency ?? DEFAULT_DECK_CONCURRENCY);
+    //
+    // D4: adaptive concurrency. We start at the configured ceiling
+    // and let workers gate on `#activeBudget`. On a Cloudflare
+    // challenge we halve the budget; after 20 consecutive deck
+    // successes we ramp back up by one (capped at the ceiling).
+    // Workers waiting beyond the budget poll every 200ms instead of
+    // exiting, so the pool can self-heal once the site cools off.
+    const ceiling = Math.max(1, this.#opts.deckConcurrency ?? DEFAULT_DECK_CONCURRENCY);
+    this.#activeBudget = ceiling;
+    this.#concurrencyCeiling = ceiling;
+    this.#successStreak = 0;
     const queue = [...deckRows];
     const decks: RawDeck[] = [];
-    const workers = Array.from({ length: concurrency }, (_, i) => i).map(async (i) => {
+    const workers = Array.from({ length: ceiling }, (_, i) => i).map(async (i) => {
       // Worker 0 keeps the shared main page; workers 1..N spin up
       // a fresh page so they don't fight each other for the URL bar.
       const wp = i === 0 ? page : await this.#context!.newPage();
       try {
         while (queue.length > 0) {
-          const row = queue.shift()!;
+          // D4: gate by current active budget. Worker indices >=
+          // budget park here and wake up if the budget grows back.
+          // Polling is fine — deck fetches take seconds, not ms.
+          while (i >= this.#activeBudget) {
+            if (queue.length === 0) return;
+            await sleep(200);
+          }
+          const row = queue.shift();
+          if (!row) break;
           // D1: skip refetching decks the prior dataset already has.
-          // We compute the prospective Deck.externalKey from the
-          // deck detail URL we already extracted from the row, so
-          // no navigation is required.
           if (this.#opts.priorDecksSeen?.(deckExternalKey(SOURCE_NAME, row.href))) {
             this.#opts.onDeckFetched?.({ resolved: false, failed: false });
             continue;
@@ -313,9 +333,13 @@ export class InkdecksAdapter implements SourceAdapter {
               // B2: stream to orchestrator for partial-tournament
               // persistence before moving to the next worker iter.
               this.#opts.onDeckScraped?.(deck);
+              this.#noteDeckSuccess();
+            } else {
+              this.#noteDeckFailure();
             }
             this.#opts.onDeckFetched?.({ resolved: Boolean(deck), failed: !deck });
           } catch {
+            this.#noteDeckFailure();
             this.#opts.onDeckFetched?.({ resolved: false, failed: true });
           }
           await sleep(this.#opts.deckDelayMs ?? DEFAULT_DECK_DELAY_MS);
@@ -420,6 +444,36 @@ export class InkdecksAdapter implements SourceAdapter {
     if (/just a moment/i.test(title)) return true;
     const text = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
     return /verifying you are human|just a moment/i.test(text);
+  }
+
+  /** D4: shrink the active deck-worker budget. Called on any deck
+   *  fetch failure (Cloudflare challenge, navigation timeout, etc).
+   *  Halves the budget down to a floor of 1; cancels any pending
+   *  ramp-up by zeroing the success streak. */
+  #noteDeckFailure(): void {
+    this.#successStreak = 0;
+    const halved = Math.max(1, Math.floor(this.#activeBudget / 2));
+    if (halved < this.#activeBudget) {
+      process.stderr.write(
+        `[${SOURCE_NAME}] deck failure: shrinking concurrency ${this.#activeBudget} -> ${halved}\n`,
+      );
+      this.#activeBudget = halved;
+    }
+  }
+
+  /** D4: count a successful deck and consider ramping back up. */
+  #noteDeckSuccess(): void {
+    this.#successStreak++;
+    // Ramp +1 after every 20 consecutive successes, capped at the
+    // ceiling. Cloudflare typically settles quickly once the
+    // backoff burst has cleared.
+    if (this.#successStreak >= 20 && this.#activeBudget < this.#concurrencyCeiling) {
+      this.#successStreak = 0;
+      this.#activeBudget = Math.min(this.#concurrencyCeiling, this.#activeBudget + 1);
+      process.stderr.write(
+        `[${SOURCE_NAME}] 20 deck successes: growing concurrency -> ${this.#activeBudget}\n`,
+      );
+    }
   }
 
   async #scrapeListing(page: Page): Promise<ListedTournament[]> {
