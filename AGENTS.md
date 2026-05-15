@@ -30,18 +30,18 @@ Then re-run `pnpm lint` to confirm green before committing.
   were single-file prettier-format issues that would have been
   caught by `pnpm lint` locally in under 2 seconds.
 - Treat a green `pnpm lint && pnpm typecheck && pnpm test --
-  --run` as a **required** precondition for `git push`, the
+--run` as a **required** precondition for `git push`, the
   same way a passing build is.
 
 ## Verification commands (reference)
 
-| Step | Command | What it catches |
-|---|---|---|
-| Lint | `pnpm lint` | ESLint rules + Prettier formatting |
-| Format fix | `pnpm format` | Auto-fixes Prettier issues |
-| Typecheck | `pnpm typecheck` | TS compile errors (no emit) |
-| Tests | `pnpm test -- --run` | Vitest unit suite |
-| Build | `pnpm build` | tsup bundle (only needed when changing build) |
+| Step       | Command              | What it catches                               |
+| ---------- | -------------------- | --------------------------------------------- |
+| Lint       | `pnpm lint`          | ESLint rules + Prettier formatting            |
+| Format fix | `pnpm format`        | Auto-fixes Prettier issues                    |
+| Typecheck  | `pnpm typecheck`     | TS compile errors (no emit)                   |
+| Tests      | `pnpm test -- --run` | Vitest unit suite                             |
+| Build      | `pnpm build`         | tsup bundle (only needed when changing build) |
 
 ## Live smoke (optional, for adapter changes)
 
