@@ -4,10 +4,16 @@ name: scrape
 #
 # Per-source split (A2):
 #   prepare           — resolve pinned cards-vN + latest tournaments-vN
-#   scrape-limitless  — single runner, REST API
-#   scrape-lorcana-gg — single runner, HTTP-only via dotgg
-#   scrape-topdeck    — single runner, REST API (TOPDECK_API_KEY)
-#   merge             — stitch shard artifacts into one dataset
+#   scrape-limitless  — 4-shard matrix, REST API
+#   scrape-lorcana-gg — 4-shard matrix, HTTP-only via dotgg
+#   scrape-topdeck    — 4-shard matrix, REST API (TOPDECK_API_KEY)
+#   merge             — stitch every shard artifact into one dataset
+#
+# Each source is run as a hash-modulo matrix (A1): every shard
+# walks the full listing but only fetches standings/decks whose
+# tournamentKey hashes to its bucket. Bumping the matrix size on
+# any single source scales the work linearly without re-thinking
+# pagination.
 #
 # All adapters are API-based — no HTML scraping, no headless
 # browser, no Cloudflare Turnstile. A 1015 / 429 on one source
@@ -111,9 +117,17 @@ jobs:
   scrape-lorcana-gg:
     needs: prepare
     runs-on: ubuntu-latest
-    # lorcana.gg is pure HTTP — even a worst-case backfill plus an
-    # adaptive Cloudflare 1015 cooldown stays well under an hour.
+    # lorcana.gg is pure HTTP. Each shard lists the full archive
+    # then takes a hash-mod slice of new refs (A1), so they all
+    # progress in parallel without overlapping API spend on the
+    # standings/deck fetches.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      TOTAL_SHARDS: 4
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -138,11 +152,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/http-cache
-          key: http-cache-lorcana-gg-${{ needs.prepare.outputs.prior_tag }}
+          # Shared restore prefix: cache writes are unique per shard
+          # so we don't collide, but every shard can read the
+          # warmest preceding cache via the prefix fallback.
+          key: http-cache-lorcana-gg-${{ needs.prepare.outputs.prior_tag }}-shard-${{ matrix.shard }}
           restore-keys: |
+            http-cache-lorcana-gg-${{ needs.prepare.outputs.prior_tag }}-
             http-cache-lorcana-gg-
 
-      - name: Run pipeline (lorcana.gg)
+      - name: Run pipeline (lorcana.gg shard ${{ matrix.shard }})
         run: |
           args=()
           max_t="${{ inputs.max_tournaments }}"
@@ -154,6 +172,8 @@ jobs:
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
             --sources lorcana.gg \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ env.TOTAL_SHARDS }} \
             --max-decks-per-tournament 16 \
             --out ./out "${args[@]}"
 
@@ -161,7 +181,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-lorcana-gg
+          name: shard-lorcana-gg-${{ matrix.shard }}
           path: out/
           retention-days: 7
           if-no-files-found: ignore
@@ -170,9 +190,15 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     # Limitless is a public REST API with a 50-req-per-5-min rate
-    # limit. Even a full backfill of ~70 tournaments × 1 standings
-    # call each stays under 15 min.
+    # limit. Sharding helps when ingesting hundreds of standings
+    # endpoints — each shard owns ~1/N of the new refs.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      TOTAL_SHARDS: 4
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -198,12 +224,15 @@ jobs:
         with:
           path: out/http-cache
           # Standings are immutable; once cached, re-runs cost zero
-          # API budget for already-ingested tournaments.
-          key: http-cache-limitless-${{ needs.prepare.outputs.prior_tag }}
+          # API budget for already-ingested tournaments. Per-shard
+          # write key + shared restore prefix lets every shard pick
+          # up the freshest cache from any prior shard or run.
+          key: http-cache-limitless-${{ needs.prepare.outputs.prior_tag }}-shard-${{ matrix.shard }}
           restore-keys: |
+            http-cache-limitless-${{ needs.prepare.outputs.prior_tag }}-
             http-cache-limitless-
 
-      - name: Run pipeline (limitlesstcg.com)
+      - name: Run pipeline (limitlesstcg.com shard ${{ matrix.shard }})
         run: |
           args=()
           max_t="${{ inputs.max_tournaments }}"
@@ -215,6 +244,8 @@ jobs:
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
             --sources limitlesstcg.com \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ env.TOTAL_SHARDS }} \
             --max-decks-per-tournament 16 \
             --min-players 8 \
             --out ./out "${args[@]}"
@@ -223,7 +254,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-limitless
+          name: shard-limitless-${{ matrix.shard }}
           path: out/
           retention-days: 7
           if-no-files-found: ignore
@@ -231,10 +262,17 @@ jobs:
   scrape-topdeck:
     needs: prepare
     runs-on: ubuntu-latest
-    # TopDeck.gg's bulk endpoint has a low rate limit, but Lorcana
-    # coverage is sparse so any single scrape stays well under the
-    # cap. 30 min is plenty.
+    # TopDeck.gg's bulk endpoint has a low rate limit and the full
+    # tournament list comes back in a single POST. Sharding here
+    # parallelises standings-level work once Lorcana coverage grows;
+    # for now every shard sees a small slice (often empty).
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      TOTAL_SHARDS: 4
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -255,7 +293,7 @@ jobs:
         with:
           name: scrape-inputs
 
-      - name: Run pipeline (topdeck.gg)
+      - name: Run pipeline (topdeck.gg shard ${{ matrix.shard }})
         env:
           # The adapter is a no-op when this secret is missing, so a
           # fork without the secret won't fail the job — it just
@@ -272,6 +310,8 @@ jobs:
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
             --sources topdeck.gg \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ env.TOTAL_SHARDS }} \
             --max-decks-per-tournament 16 \
             --min-players 8 \
             --out ./out "${args[@]}"
@@ -280,7 +320,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-topdeck
+          name: shard-topdeck-${{ matrix.shard }}
           path: out/
           retention-days: 7
           if-no-files-found: ignore
