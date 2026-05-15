@@ -101,6 +101,7 @@ export interface RunResult {
 }
 
 export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResult> {
+  const runStartedAt = Date.now();
   const cards = loadCards(opts.cardsPath);
   const index = buildCardIndex(cards.cards);
 
@@ -373,6 +374,20 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     dataset,
     report: finalReport,
     affectedDecks: report.affectedDecks(),
+  });
+
+  // F2: a small, parseable summary of THIS run. The merge job
+  // stitches one per shard into the final release notes (E3).
+  writeRunSummary({
+    outDir: outDirAbs,
+    startedAt: new Date(Date.now() - (Date.now() - runStartedAt)).toISOString(),
+    runStartedAt,
+    sources: enabled.map((a) => a.sourceName),
+    tournamentsAdded: added.length,
+    totalTournaments: merged.length,
+    shardIndex: opts.shardIndex,
+    shardCount: opts.shardCount,
+    report: finalReport,
   });
 
   return {
@@ -684,6 +699,65 @@ function writeShardMeta(args: {
     writeFileSync(resolve(outDirAbs, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
   } catch (err) {
     process.stderr.write(`[shard-meta] write failed: ${(err as Error).message}\n`);
+  }
+}
+
+/**
+ * Write a small, structured per-run summary into the shard's output
+ * directory. The merge job converts this into a markdown block per
+ * shard for the release notes (E3).
+ */
+function writeRunSummary(args: {
+  outDir: string;
+  startedAt: string;
+  runStartedAt: number;
+  sources: readonly string[];
+  tournamentsAdded: number;
+  totalTournaments: number;
+  shardIndex: number | undefined;
+  shardCount: number | undefined;
+  report: ReturnType<ReportBuilder["build"]>;
+}): void {
+  const {
+    outDir,
+    startedAt,
+    runStartedAt,
+    sources,
+    tournamentsAdded,
+    totalTournaments,
+    shardIndex,
+    shardCount,
+    report,
+  } = args;
+  const elapsedMs = Date.now() - runStartedAt;
+  const summary = {
+    startedAt,
+    elapsedMs,
+    sources,
+    shard: shardCount && shardCount > 1 ? { index: shardIndex ?? 0, count: shardCount } : null,
+    tournamentsAdded,
+    totalTournaments,
+    resolutionFailureRate: report.totalFailureRate,
+    perSource: Object.fromEntries(
+      Object.entries(report.sources).map(([name, s]) => [
+        name,
+        {
+          tournamentsListed: s.tournamentsListed,
+          tournamentsKept: s.tournamentsKept,
+          decksKept: s.decksKept,
+          decksWithUnresolved: s.decksWithUnresolved,
+          cardsTotal: s.cardsTotal,
+          cardsResolved: s.cardsResolved,
+          failureRate: s.cardsTotal === 0 ? 0 : 1 - s.cardsResolved / s.cardsTotal,
+        },
+      ]),
+    ),
+  };
+  try {
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(resolve(outDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
+  } catch (err) {
+    process.stderr.write(`[run-summary] write failed: ${(err as Error).message}\n`);
   }
 }
 

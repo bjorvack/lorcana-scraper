@@ -296,6 +296,52 @@ jobs:
         with:
           name: scrape-inputs
 
+      - name: Build shard summary block
+        id: shard_summary
+        run: |
+          # E3: every shard writes a summary.json (F2). Stitch
+          # them into a markdown table so the release notes show
+          # who did what. Uses bash heredoc so it survives ${{ }}
+          # quoting; output stored as a single multi-line GHA
+          # output variable.
+          shopt -s nullglob
+          summaries=(shards/shard-*/summary.json)
+          {
+            echo "### Shard runs"
+            echo
+            if [ ${#summaries[@]} -eq 0 ]; then
+              echo "_no shard summaries found_"
+            else
+              echo "| Shard | Sources | Added | Total | Decks (added/kept) | Elapsed | Failure |"
+              echo "|---|---|---:|---:|---|---:|---:|"
+              for s in "${summaries[@]}"; do
+                shard=$(basename "$(dirname "$s")")
+                jq -r --arg shard "$shard" '
+                  ( .sources | join(",") ) as $sources
+                  | ( .tournamentsAdded // 0 ) as $added
+                  | ( .totalTournaments // 0 ) as $total
+                  | ( [ .perSource[]?.decksKept // 0 ] | add // 0 ) as $decks
+                  | ( ( .elapsedMs // 0 ) / 1000 | floor ) as $secs
+                  | ( ( .resolutionFailureRate // 0 ) * 100 | floor / 100 ) as $rate
+                  | "| \($shard) | \($sources) | \($added) | \($total) | \($decks) | \($secs)s | \($rate)% |"
+                ' "$s"
+              done
+            fi
+          } > shard-summary.md
+          {
+            echo "summary<<EOF"
+            cat shard-summary.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload shard-summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-summary
+          path: shard-summary.md
+          retention-days: 30
+
       - name: Merge shards
         run: |
           # nullglob: if no shard artifact landed, the array is empty
@@ -418,6 +464,8 @@ jobs:
             echo
             echo "Pinned cards snapshot: \`${{ needs.prepare.outputs.cards_tag }}\`"
             echo "\`cardSetVersion\`: \`$card_set_v\`"
+            echo
+            cat shard-summary.md 2>/dev/null || true
             echo
             echo "See \`resolution-report.json\` (attached) for per-source stats."
           } > release-notes.md
