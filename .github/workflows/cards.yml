@@ -51,6 +51,11 @@ jobs:
           if [ -n "$prior_tag" ]; then
             echo "Found prior tag: $prior_tag"
             gh release download "$prior_tag" -p cards.json -D prior
+            # Pull banlist + rotation too so we can fall back to the
+            # prior copies if today's lorcana.gg fetch is blocked
+            # (Cloudflare has been 403'ing the HTML page intermittently).
+            gh release download "$prior_tag" -p banlist.json -D prior || true
+            gh release download "$prior_tag" -p rotation.json -D prior || true
             echo "tag=$prior_tag" >> "$GITHUB_OUTPUT"
             echo "have_prior=1" >> "$GITHUB_OUTPUT"
           else
@@ -83,8 +88,29 @@ jobs:
       # files come from the same lorcana.gg sources and refresh on the
       # same monthly-ish cadence; co-locating means downstream consumers
       # only pin one tag.
+      #
+      # lorcana.gg's HTML pages are increasingly Cloudflare-protected
+      # (intermittent 403 / 1015) so this step is non-fatal: a failed
+      # scrape falls back to the prior cards-vN release's banlist +
+      # rotation copies. Stale-but-present beats absent.
       - name: Scrape banlist + rotation
+        id: legality
+        continue-on-error: true
         run: pnpm scrape:legality --out ./out
+
+      - name: Fall back to prior banlist + rotation if scrape failed
+        run: |
+          for f in banlist.json rotation.json; do
+            if [ ! -f "./out/$f" ]; then
+              if [ -f "./prior/$f" ]; then
+                echo "::warning::scrape:legality didn't produce $f; reusing prior copy from ${{ steps.prior.outputs.tag }}"
+                cp "./prior/$f" "./out/$f"
+              else
+                echo "::warning::scrape:legality didn't produce $f and no prior copy exists; emitting empty stub"
+                echo '{}' > "./out/$f"
+              fi
+            fi
+          done
 
       - name: Upload artifacts (always)
         uses: actions/upload-artifact@v4
