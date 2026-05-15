@@ -9,6 +9,7 @@
  *   merge with prior
  *   write artifacts
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -24,7 +25,6 @@ import {
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter } from "../sources/types.js";
 import { InkdecksAdapter } from "../sources/inkdecks.js";
-import { LegacyCacheAdapter } from "../sources/legacy-cache.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
 import { normaliseKey } from "../resolve/normalise.js";
@@ -53,8 +53,13 @@ export interface RunOptions {
   readonly pageFrom?: number;
   /** Shard: highest listing page to consider (inclusive). */
   readonly pageTo?: number;
-  /** Max tournaments per source per run (top of pagination). Default: unlimited. */
-  readonly maxTournaments?: number;
+  /**
+   * Max tournaments per source per run (top of pagination). Default: unlimited.
+   * Either a number (uniform cap) or a `{ name: N, default?: N }` map for
+   * per-source caps. Useful when a slow adapter (e.g. inkdecks.com behind
+   * Cloudflare Turnstile) would otherwise stall the whole job.
+   */
+  readonly maxTournaments?: number | Record<string, number>;
   /** Concurrency for deck fetches inside each tournament. Default: 1 (rate-limit-friendly). */
   readonly deckConcurrency?: number;
   /** Skip tournaments below this player count. */
@@ -148,6 +153,10 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   for (const adapter of enabled) {
     report.startSource(adapter.sourceName);
     progress.startSource(adapter.sourceName);
+    const sourceCap = resolveMaxFor(adapter.sourceName, opts.maxTournaments);
+    if (sourceCap !== undefined) {
+      process.stderr.write(`[${adapter.sourceName}] cap: ${sourceCap} tournaments this run\n`);
+    }
     // Re-instantiate adapters that accept run-time options.
     const ad = applyAdapterOptions(adapter, {
       priorSeen,
@@ -155,7 +164,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       pageFrom: opts.pageFrom,
       pageTo: opts.pageTo,
       deckConcurrency: opts.deckConcurrency,
-      maxResults: opts.maxTournaments,
+      maxResults: sourceCap,
       minPlayers: opts.minPlayers,
       maxDecksPerTournament: opts.maxDecksPerTournament,
       requestSpacingMs: opts.requestSpacingMs,
@@ -171,8 +180,7 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     report.noteListing(adapter.sourceName, refs.length);
     process.stderr.write(`[${adapter.sourceName}] listed ${refs.length} tournaments\n`);
 
-    const limited =
-      typeof opts.maxTournaments === "number" ? refs.slice(0, opts.maxTournaments) : refs;
+    const limited = sourceCap !== undefined ? refs.slice(0, sourceCap) : refs;
     progress.setTournamentsTotal(limited.length);
 
     // Default to persisting after every tournament so a crash/SIGINT mid-run
@@ -253,6 +261,22 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
   };
 }
 
+/**
+ * Resolve the tournaments cap for `sourceName`. Returns `undefined`
+ * (no cap) if `spec` is undefined. For map specs we fall back to a
+ * `default` bucket if the named source isn't listed.
+ */
+function resolveMaxFor(
+  sourceName: string,
+  spec: number | Record<string, number> | undefined,
+): number | undefined {
+  if (spec === undefined) return undefined;
+  if (typeof spec === "number") return spec;
+  if (sourceName in spec) return spec[sourceName];
+  if ("default" in spec) return spec.default;
+  return undefined;
+}
+
 function projectTournament(args: {
   adapterName: string;
   ref: { sourceUrl: string; name?: string; date?: string };
@@ -270,11 +294,17 @@ function projectTournament(args: {
   const tournament: TournamentT = Tournament.parse({
     sourceUrl: raw.sourceUrl,
     sourceName: adapterName,
+    externalKey: externalKey(adapterName, raw.sourceUrl),
     name: raw.name,
     date: raw.date,
     decks,
   });
   return tournament;
+}
+
+/** sha256 of `sourceName|<source-specific id>`. Stable across runs. */
+function externalKey(sourceName: string, id: string): string {
+  return createHash("sha256").update(`${sourceName}|${id}`).digest("hex");
 }
 
 function projectDeck(
@@ -336,12 +366,23 @@ function projectDeck(
   const inks = [...inksUsed];
   if (inks.length === 0 || inks.length > 2) return null;
 
+  // Stable deck key. Prefer the canonical externalUrl, fall back to
+  // the source-specific externalId, then a (tournament-url, displayName)
+  // composite so adapters that emit neither still get a deterministic
+  // key. This is what downstream consumers (training, web) use to skip
+  // already-processed decks across re-runs.
+  const deckId =
+    raw.externalUrl ??
+    raw.externalId ??
+    `${rawTournament.sourceUrl}#${raw.displayName ?? raw.player ?? ""}`;
   const deck: DeckT = {
     inks: inks as DeckT["inks"],
     cards,
     name: raw.displayName ?? null,
     // Prefer the direct deck URL (lets reviewers click straight through).
     source: raw.externalUrl ?? sourceName,
+    externalKey: externalKey(sourceName, deckId),
+    ...(raw.externalUrl ? { externalUrl: raw.externalUrl } : {}),
   };
   report.noteDeckKept(sourceName);
   return {
@@ -382,17 +423,6 @@ function applyAdapterOptions(
       cacheDir: opts.cacheDir,
       onDeckFetched: opts.onDeckFetched,
       onTournamentStart: opts.onTournamentStart,
-    });
-  }
-  if (adapter instanceof LegacyCacheAdapter) {
-    // Share the lorcana-gg shard range so the static legacy seed
-    // is partitioned across the same matrix runners. Each shard
-    // imports only its own bucket of the 1 124 tournaments instead
-    // of every shard processing the full list.
-    return new LegacyCacheAdapter({
-      priorSeen: opts.priorSeen,
-      pageFrom: opts.pageFrom,
-      pageTo: opts.pageTo,
     });
   }
   if (adapter instanceof InkdecksAdapter) {

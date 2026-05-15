@@ -29,7 +29,7 @@ interface Args {
   outDir: string;
   priorPath: string | null;
   sources: readonly string[] | null;
-  maxTournaments: number | undefined;
+  maxTournaments: number | Record<string, number> | undefined;
   maxPages: number | undefined;
   pageFrom: number | undefined;
   pageTo: number | undefined;
@@ -86,7 +86,7 @@ function parseArgs(argv: string[]): Args {
           .filter(Boolean);
         break;
       case "--max-tournaments":
-        a.maxTournaments = Number.parseInt(v(), 10);
+        a.maxTournaments = parseMaxTournaments(v());
         break;
       case "--max-pages":
         a.maxPages = Number.parseInt(v(), 10);
@@ -126,6 +126,42 @@ function parseArgs(argv: string[]): Args {
   return a;
 }
 
+/**
+ * Parse `--max-tournaments` value. Two shapes:
+ *   - Plain integer (`"50"`)         → uniform cap across all sources.
+ *   - CSV of `name=N` (and optional  → per-source cap; bare numbers go
+ *     `default=N` or bare numbers)     under the `default` bucket.
+ *
+ * Examples:
+ *   "50"                               → 50
+ *   "inkdecks.com=40,lorcana.gg=200"   → { "inkdecks.com": 40, "lorcana.gg": 200 }
+ *   "100,inkdecks.com=40"              → { default: 100, "inkdecks.com": 40 }
+ */
+function parseMaxTournaments(raw: string): number | Record<string, number> {
+  // Plain integer keeps the legacy shape so existing CLI invocations
+  // and the workflow input keep working unchanged.
+  if (/^\d+$/.test(raw.trim())) return Number.parseInt(raw, 10);
+  const out: Record<string, number> = {};
+  for (const part of raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    if (/^\d+$/.test(part)) {
+      out.default = Number.parseInt(part, 10);
+      continue;
+    }
+    const eq = part.indexOf("=");
+    if (eq <= 0) throw new Error(`Invalid --max-tournaments token "${part}" (expect name=N)`);
+    const name = part.slice(0, eq).trim();
+    const n = Number.parseInt(part.slice(eq + 1).trim(), 10);
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(`Invalid --max-tournaments value for "${name}": ${part.slice(eq + 1)}`);
+    }
+    out[name] = n;
+  }
+  return out;
+}
+
 function printUsage(): void {
   process.stdout.write(
     [
@@ -142,7 +178,10 @@ function printUsage(): void {
       "                             automatically (so re-running the same",
       "                             command resumes from where it left off).",
       "  --sources <csv>            Adapter names (default: all)",
-      "  --max-tournaments <n>      Cap tournaments per source this run",
+      "  --max-tournaments <spec>   Cap tournaments per source. Either a bare",
+      "                             integer (uniform cap), or a CSV of",
+      "                             `name=N` (with optional `default=N`),",
+      "                             e.g. `inkdecks.com=40,lorcana.gg=200`",
       "  --max-pages <n>            Cap pagination depth",
       "  --page-from <n>            Only list pages >= N (shard; default: 1)",
       "  --page-to <n>              Only list pages <= N (shard; default: max-pages)",

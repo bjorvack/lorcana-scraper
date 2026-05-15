@@ -21,7 +21,7 @@ on:
         type: boolean
         default: false
       max_tournaments:
-        description: "Cap tournaments per shard (debug)"
+        description: "Per-source cap (e.g. 50 or `inkdecks.com=40,lorcana.gg=200`)"
         type: string
         default: ""
 
@@ -161,7 +161,13 @@ jobs:
       - name: Run pipeline (shard ${{ matrix.shard }})
         run: |
           args=()
-          [ -n "${{ inputs.max_tournaments }}" ] && args+=("--max-tournaments" "${{ inputs.max_tournaments }}")
+          # Per-source caps. inkdecks.com is slow (Cloudflare Turnstile +
+          # headless chromium) and ate the full 6h timeout on the first
+          # backfill run; cap it so the shard always finishes. lorcana.gg
+          # is fast — let the priorSeen short-circuit handle dedup.
+          max_t="${{ inputs.max_tournaments }}"
+          [ -z "$max_t" ] && max_t="inkdecks.com=40"
+          args+=("--max-tournaments" "$max_t")
           if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
             args+=("--prior" "./prior/dataset.json")
           fi
