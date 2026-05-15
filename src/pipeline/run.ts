@@ -23,7 +23,7 @@ import {
   type TournamentT,
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
-import type { RawDeck, RawTournament, SourceAdapter } from "../sources/types.js";
+import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "../sources/types.js";
 import { InkdecksAdapter } from "../sources/inkdecks.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
@@ -190,6 +190,37 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
     if (sourceCap !== undefined) {
       process.stderr.write(`[${adapter.sourceName}] cap: ${sourceCap} tournaments this run\n`);
     }
+    // B2 streaming state: the orchestrator owns a mutable, partial
+    // RawTournament that the adapter populates one deck at a time
+    // via `onDeckScraped`. After every deck we attempt to project
+    // & persist the partial — so a crash mid-tournament keeps every
+    // deck that already made it through.
+    let streamingRef: TournamentRef | null = null;
+    const streamingDecks: RawDeck[] = [];
+    const persistStreaming = (): void => {
+      if (!streamingRef || streamingDecks.length === 0) return;
+      const partial = projectTournament({
+        adapterName: adapter.sourceName,
+        ref: streamingRef,
+        raw: {
+          sourceUrl: streamingRef.sourceUrl,
+          name: streamingRef.name ?? "",
+          date: streamingRef.date ?? "",
+          decks: streamingDecks,
+        },
+        index,
+        dotggIndex,
+        report,
+      });
+      if (partial) {
+        try {
+          writeTournamentFile(outDirAbs, partial);
+        } catch {
+          /* best-effort; final write will retry */
+        }
+      }
+    };
+
     // Re-instantiate adapters that accept run-time options.
     const ad = applyAdapterOptions(adapter, {
       priorSeen,
@@ -206,6 +237,10 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       // Delete <outDir>/http-cache to invalidate.
       cacheDir: resolve(outDirAbs, "http-cache"),
       onDeckFetched: (a) => progress.noteDeck(a),
+      onDeckScraped: (deck) => {
+        streamingDecks.push(deck);
+        persistStreaming();
+      },
       onTournamentStart: (a) => progress.setCurrentTournamentDeckCount(a.deckCount),
     });
 
@@ -250,6 +285,11 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
       process.stderr.write(
         `[${adapter.sourceName}] (${i}/${limited.length}) ${tournamentName}...\n`,
       );
+      // B2: reset the streaming buffer for this tournament. The
+      // adapter will push decks into `streamingDecks` via the
+      // `onDeckScraped` callback above as it goes.
+      streamingRef = ref;
+      streamingDecks.length = 0;
       try {
         const raw = await ad.fetchTournament(ref, {} as never);
         const tournament = projectTournament({
@@ -508,6 +548,7 @@ function applyAdapterOptions(
     requestSpacingMs?: number;
     cacheDir?: string;
     onDeckFetched?: (a: { resolved: boolean; failed: boolean }) => void;
+    onDeckScraped?: (deck: RawDeck) => void;
     onTournamentStart?: (a: { deckCount: number }) => void;
   },
 ): SourceAdapter {
@@ -525,6 +566,7 @@ function applyAdapterOptions(
       requestSpacingMs: opts.requestSpacingMs,
       cacheDir: opts.cacheDir,
       onDeckFetched: opts.onDeckFetched,
+      onDeckScraped: opts.onDeckScraped,
       onTournamentStart: opts.onTournamentStart,
     });
   }
@@ -539,6 +581,7 @@ function applyAdapterOptions(
       deckConcurrency: opts.deckConcurrency,
       onTournamentStart: opts.onTournamentStart,
       onDeckFetched: opts.onDeckFetched,
+      onDeckScraped: opts.onDeckScraped,
     });
   }
   return adapter;

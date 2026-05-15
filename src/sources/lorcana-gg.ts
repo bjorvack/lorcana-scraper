@@ -158,6 +158,14 @@ export interface LorcanaGgOptions {
   readonly maxDecksPerTournament?: number;
   /** Optional progress callback fired once per attempted deck. */
   readonly onDeckFetched?: (args: { resolved: boolean; failed: boolean }) => void;
+  /**
+   * B2 streaming hook. Fired with the actual `RawDeck` immediately
+   * after it's fetched & parsed, *before* the tournament finishes.
+   * The orchestrator uses this to persist a partial-tournament
+   * snapshot per deck so a crash mid-tournament keeps every deck
+   * that already made it through.
+   */
+  readonly onDeckScraped?: (deck: RawDeck) => void;
   /** Optional callback fired right before deck fetches start. */
   readonly onTournamentStart?: (args: { deckCount: number }) => void;
   /**
@@ -285,9 +293,15 @@ export class LorcanaGgAdapter implements SourceAdapter {
     }
     this.opts.onTournamentStart?.({ deckCount: standings.length });
     const onDeckFetched = this.opts.onDeckFetched;
+    const onDeckScraped = this.opts.onDeckScraped;
     const decks = await mapInPool(standings, concurrency, async (s) => {
       const result = await this.standingToRawDeck(s);
       onDeckFetched?.({ resolved: result !== null, failed: result === null });
+      // B2: stream the deck out the moment it's ready so the pipeline
+      // can persist a partial-tournament snapshot. We deliberately
+      // call this even for D1-skipped decks (result === null when the
+      // skip happens) so the orchestrator sees uniform progress.
+      if (result) onDeckScraped?.(result);
       return result;
     });
     const isoDate = toIsoDate(detail.date);

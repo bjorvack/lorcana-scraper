@@ -114,6 +114,10 @@ export interface InkdecksAdapterOptions {
   readonly onTournamentStart?: (a: { deckCount: number }) => void;
   /** Per-deck progress callback. */
   readonly onDeckFetched?: (a: { resolved: boolean; failed: boolean }) => void;
+  /** B2 streaming hook: fired with the actual `RawDeck` as soon as
+   *  it lands so the pipeline can persist a partial tournament after
+   *  every deck. A crash mid-tournament keeps everything that made it. */
+  readonly onDeckScraped?: (deck: RawDeck) => void;
 }
 
 function tournamentKey(sourceUrl: string): string {
@@ -291,7 +295,12 @@ export class InkdecksAdapter implements SourceAdapter {
           }
           try {
             const deck = await this.#fetchDeck(wp, row);
-            if (deck) decks.push(deck);
+            if (deck) {
+              decks.push(deck);
+              // B2: stream to orchestrator for partial-tournament
+              // persistence before moving to the next worker iter.
+              this.#opts.onDeckScraped?.(deck);
+            }
             this.#opts.onDeckFetched?.({ resolved: Boolean(deck), failed: !deck });
           } catch {
             this.#opts.onDeckFetched?.({ resolved: false, failed: true });
