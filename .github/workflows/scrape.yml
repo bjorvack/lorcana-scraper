@@ -362,6 +362,15 @@ jobs:
         with:
           name: scrape-inputs
 
+      # Chromium for the Playwright escalation path in
+      # src/sources/dreamborn.ts. dreamborn.ink is Cloudflare-fronted
+      # and 403s the undici fetch from GitHub-runner IPs; the
+      # Playwright APIRequestContext uses a real browser TLS profile
+      # which Cloudflare actually accepts. Lazy-loaded inside the
+      # adapter so this only matters when escalation fires.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Run pipeline (dreamborn.ink)
         run: |
           args=()
