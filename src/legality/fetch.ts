@@ -33,12 +33,12 @@ export const LORCANA_GG_BANLIST_URL = "https://lorcana.gg/banned-card-list/";
 export const LORCANA_GG_ROTATION_URL = "https://lorcana.gg/rotation/";
 
 // lorcana.gg sits behind Cloudflare which now reliably 403's the
-// previous "lorcana-scraper/..." UA from GitHub-hosted runners. The
-// page itself has no JS challenge — it just inspects headers — so a
-// full desktop-Chrome header set is enough to clear the Browser
-// Integrity Check without needing a real browser. If Cloudflare ever
-// escalates to a JS challenge we'll need Playwright; see legality.yml
-// for the workflow-level fallback that keeps CI green in the meantime.
+// previous "lorcana-scraper/..." UA from GitHub-hosted runners.
+// Locally (residential IP) the browser-shaped header set below is
+// enough to clear the Browser Integrity Check. From GitHub-runner IP
+// ranges Cloudflare's risk score is high enough that headers alone
+// still 403 — we fall through to a Playwright-driven headless
+// Chromium navigation (see ``fetchHtmlBrowser`` + ``fetchPage``).
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -112,6 +112,72 @@ export async function fetchHtml(url: string): Promise<string> {
   throw new Error(`${url}: fetch failed`);
 }
 
+/** GET a URL via headless Chromium. Used as the escalation path
+ * when undici hits a Cloudflare wall (typically a 403 from
+ * GitHub-runner IP ranges).
+ *
+ * Playwright is dynamic-imported so the unit suite — which never
+ * exercises this path — doesn't have to bundle/load it. The browser
+ * is launched fresh per call: each scrape only does two navigations
+ * and re-using a context across them is not worth the extra
+ * lifecycle code given how rarely this runs. */
+export async function fetchHtmlBrowser(url: string): Promise<string> {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      locale: "en-US",
+      extraHTTPHeaders: {
+        "accept-language": "en-US,en;q=0.9",
+        referer: "https://lorcana.gg/",
+      },
+    });
+    const page = await context.newPage();
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: PER_REQUEST_TIMEOUT_MS,
+    });
+    // Both pages render the data we care about into <table>s. Waiting
+    // for the first one keeps us robust against the page still being
+    // mid-render when domcontentloaded fires; if no table ever
+    // appears we still fall through and return whatever HTML we have
+    // — the parser will then throw on missing selectors, which is
+    // the right signal (page structure drifted).
+    await page.waitForSelector("table", { timeout: 5_000 }).catch(() => undefined);
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
+}
+
+/** Injection seam for ``fetchPage``. The defaults call the real
+ * undici + playwright impls; tests substitute mocks. */
+export interface PageFetchers {
+  readonly undici?: (url: string) => Promise<string>;
+  readonly browser?: (url: string) => Promise<string>;
+}
+
+const CLOUDFLARE_HTTP_MARKER = /HTTP (?:403|429|5\d\d)\b/;
+
+/** Try undici first (fast, cheap), and on a Cloudflare-shaped
+ * failure (403/429/5xx) escalate to a real headless browser. Any
+ * other error — DNS, abort, schema-shaped parse problem — propagates
+ * as-is so a real bug doesn't get masked by a 30-second browser
+ * launch. */
+export async function fetchPage(url: string, fetchers: PageFetchers = {}): Promise<string> {
+  const undiciFetch = fetchers.undici ?? fetchHtml;
+  const browserFetch = fetchers.browser ?? fetchHtmlBrowser;
+  try {
+    return await undiciFetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!CLOUDFLARE_HTTP_MARKER.test(msg)) throw err;
+    process.stderr.write(`[fetchPage] ${msg} — escalating to headless browser\n`);
+    return await browserFetch(url);
+  }
+}
+
 /** Parse a date string into ISO ``YYYY-MM-DD``. Returns ``null`` for
  * unrecognised inputs so the caller can decide whether to bail or
  * forecast.
@@ -173,7 +239,7 @@ export function parseDateOrQuarter(s: string): { date: string; forecast: boolean
 // ---------- Banlist ------------------------------------------------
 
 export async function scrapeBanlist(): Promise<FetchedBanlist> {
-  const html = await fetchHtml(LORCANA_GG_BANLIST_URL);
+  const html = await fetchPage(LORCANA_GG_BANLIST_URL);
   const $ = cheerio.load(html);
 
   // The first <table> on the page is the "Current Banned Cards" list.
@@ -246,7 +312,7 @@ function extractSetCode(cellText: string): string | null {
 }
 
 export async function scrapeRotation(): Promise<FetchedRotation> {
-  const html = await fetchHtml(LORCANA_GG_ROTATION_URL);
+  const html = await fetchPage(LORCANA_GG_ROTATION_URL);
   const $ = cheerio.load(html);
 
   const blocks: { name: string; setCodes: string[]; releaseDate: string; rotationDate: string }[] =

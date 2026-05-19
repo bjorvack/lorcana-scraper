@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { parseAbsoluteDate, parseDateOrQuarter, parseQuarter } from "../../src/legality/fetch.js";
+import {
+  fetchPage,
+  parseAbsoluteDate,
+  parseDateOrQuarter,
+  parseQuarter,
+} from "../../src/legality/fetch.js";
 
 describe("parseAbsoluteDate", () => {
   it("parses Month Day, Year regardless of host timezone", () => {
@@ -46,5 +51,40 @@ describe("parseDateOrQuarter", () => {
     });
     expect(parseDateOrQuarter("Q3 2026")).toEqual({ date: "2026-09-30", forecast: true });
     expect(parseDateOrQuarter("not a date")).toBeNull();
+  });
+});
+
+describe("fetchPage", () => {
+  const url = "https://lorcana.gg/banned-card-list/";
+
+  it("returns the undici body when undici succeeds", async () => {
+    const undici = vi.fn().mockResolvedValue("<html>ok</html>");
+    const browser = vi.fn();
+    expect(await fetchPage(url, { undici, browser })).toBe("<html>ok</html>");
+    expect(undici).toHaveBeenCalledOnce();
+    expect(browser).not.toHaveBeenCalled();
+  });
+
+  it("escalates to the browser fetcher on a 403", async () => {
+    const undici = vi.fn().mockRejectedValue(new Error(`${url}: HTTP 403 Forbidden`));
+    const browser = vi.fn().mockResolvedValue("<html>via-pw</html>");
+    expect(await fetchPage(url, { undici, browser })).toBe("<html>via-pw</html>");
+    expect(undici).toHaveBeenCalledOnce();
+    expect(browser).toHaveBeenCalledWith(url);
+  });
+
+  it("escalates on 429 and 5xx (transient Cloudflare states)", async () => {
+    const browser = vi.fn().mockResolvedValue("<html>via-pw</html>");
+    for (const status of [429, 502, 503, 504]) {
+      const undici = vi.fn().mockRejectedValue(new Error(`${url}: HTTP ${status} X`));
+      await expect(fetchPage(url, { undici, browser })).resolves.toBe("<html>via-pw</html>");
+    }
+  });
+
+  it("propagates non-Cloudflare errors without launching the browser", async () => {
+    const undici = vi.fn().mockRejectedValue(new Error("ENOTFOUND lorcana.gg"));
+    const browser = vi.fn();
+    await expect(fetchPage(url, { undici, browser })).rejects.toThrow(/ENOTFOUND/);
+    expect(browser).not.toHaveBeenCalled();
   });
 });

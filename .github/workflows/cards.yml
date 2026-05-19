@@ -41,6 +41,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Headless Chromium for the Playwright escalation path in
+      # src/legality/fetch.ts (Cloudflare 403s the undici fetch from
+      # GitHub-hosted runner IP ranges). The 'Scrape banlist +
+      # rotation' step below routes through this when undici fails.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Download prior cards-vN release (if any)
         id: prior
         env:
