@@ -40,21 +40,26 @@
  *
  * Cloudflare bypass: dreamborn.ink sits behind Cloudflare which
  * 403s the undici fetch from GitHub-runner IP ranges (verified
- * in run 26101600629 — every slice returned HTTP 403 Forbidden).
- * We mirror the legality.yml pattern: undici first (fast, works
- * locally), and on a 403/429/5xx escalate to a Playwright-backed
- * fetch that uses a real Chromium TLS profile. The browser context
- * is lazy-launched on the first escalation and reused for every
- * subsequent request in the same run, so we pay the chromium-spawn
- * cost at most once per snapshot. Closed via the adapter's
- * ``close()`` hook which run.ts already invokes after each run.
+ * in run 26101600629). undici alone fails; a Playwright
+ * ``APIRequestContext.get()`` *also* fails because it doesn't
+ * execute Cloudflare's managed JS challenge — confirmed in run
+ * 26102280903 where every slice returned ``HTTP 403 Forbidden
+ * (via browser)``. The working pattern is the same one
+ * ``src/legality/fetch.ts`` uses for lorcana.gg: navigate a real
+ * ``Page`` to the BASE origin to satisfy any CF challenge and set
+ * session cookies, then fetch each API URL *from inside the page's
+ * own JS context* via ``page.evaluate(() => fetch(url).then(r =>
+ * r.text()))``. The cookies / TLS / JS-challenge state all live on
+ * the page, so subsequent fetches sail through. We keep a single
+ * page open for the whole run and close it via ``close()`` from
+ * the pipeline's adapter shutdown hook.
  */
 
 import { createHash } from "node:crypto";
 import { fetch } from "undici";
 // Playwright is loaded *lazily* below — keep the import type-only at
 // module scope so the unit suite doesn't drag chromium into memory.
-import type { APIRequestContext, Browser } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./types.js";
 
@@ -355,47 +360,69 @@ export class DreambornAdapter implements SourceAdapter {
   // the same adapter run, then disposed via ``close()`` from the
   // pipeline's adapter shutdown hook.
   private browser: Browser | null = null;
-  private requestContext: APIRequestContext | null = null;
+  private context: BrowserContext | null = null;
+  private primedPage: Page | null = null;
 
   constructor(opts: DreambornAdapterOptions = {}) {
     this.opts = opts;
     this.rateLimiter = new RateLimiter(opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS);
   }
 
-  /** Lazily spawn a headless Chromium and return its
-   * ``APIRequestContext`` — a request-only interface that uses
-   * the browser's TLS profile (which Cloudflare actually inspects)
-   * without spinning up a full DOM. Cheaper than a real
-   * ``page.goto`` and returns raw response bodies that the JSON /
-   * HTML parsers above can consume directly. */
-  private async getBrowserRequest(): Promise<APIRequestContext> {
-    if (this.requestContext) return this.requestContext;
+  /** Lazily spawn a headless Chromium and prime it: open a real
+   * page at ``BASE`` so Cloudflare's managed JS challenge runs
+   * once and the resulting session cookies attach to the context.
+   * Subsequent fetches happen inside this page's JS context via
+   * ``fetch(url)``, which inherits the primed cookies + the
+   * actually-executed challenge state. */
+  private async getPrimedPage(): Promise<Page> {
+    if (this.primedPage) return this.primedPage;
     const { chromium } = await import("playwright");
     this.browser = await chromium.launch({ headless: true });
-    const context = await this.browser.newContext({
+    this.context = await this.browser.newContext({
       userAgent: USER_AGENT,
       locale: "en-US",
-      extraHTTPHeaders: {
-        "accept-language": "en-US,en;q=0.9",
-        referer: `${BASE}/`,
-      },
+      extraHTTPHeaders: { "accept-language": "en-US,en;q=0.9" },
     });
-    this.requestContext = context.request;
-    return this.requestContext;
+    const page = await this.context.newPage();
+    // Land on the origin. Cloudflare's managed challenge, if any,
+    // runs and sets cf_clearance / __cf_bm cookies for the context
+    // before ``domcontentloaded`` fires. ``networkidle`` would be
+    // stricter but dreamborn's Nuxt app keeps poll connections open
+    // indefinitely so it never settles — use ``domcontentloaded``
+    // plus a short post-load delay to let async CF JS finish.
+    await page.goto(`${BASE}/`, {
+      waitUntil: "domcontentloaded",
+      timeout: PER_REQUEST_TIMEOUT_MS,
+    });
+    await page.waitForTimeout(1500);
+    this.primedPage = page;
+    return this.primedPage;
   }
 
-  /** Fetch raw response text via the browser context. Treats any
-   * non-2xx as a hard failure — by the time we're here undici
-   * has already given up, so a second 403 means Cloudflare is
-   * actively blocking even the browser fingerprint and there's
-   * nothing left to try. */
+  /** Fetch raw response text via the primed page's JS context.
+   * Cloudflare can't tell this fetch apart from one issued by the
+   * SPA itself — same TLS profile, same cookies, same JS-challenge
+   * state. Treats any non-2xx as a hard failure: if even the
+   * cookie-primed fetch is 403'd, Cloudflare is actively blocking
+   * the runner IP regardless of fingerprint and there's nothing
+   * left to try client-side. */
   private async browserFetch(url: string): Promise<string> {
-    const req = await this.getBrowserRequest();
-    const res = await req.get(url, { timeout: PER_REQUEST_TIMEOUT_MS });
-    if (!res.ok()) {
-      throw new Error(`${url}: HTTP ${res.status()} ${res.statusText()} (via browser)`);
+    const page = await this.getPrimedPage();
+    // Cast to ``unknown`` and back because ``page.evaluate``'s
+    // generic isn't smart enough to thread the result type through
+    // a function expression that uses ``window.fetch``.
+    const result = (await page.evaluate(async (target: string) => {
+      const res = await fetch(target, {
+        credentials: "include",
+        headers: { accept: "application/json,text/html;q=0.9,*/*;q=0.5" },
+      });
+      const body = await res.text();
+      return { ok: res.ok, status: res.status, statusText: res.statusText, body };
+    }, url)) as { ok: boolean; status: number; statusText: string; body: string };
+    if (!result.ok) {
+      throw new Error(`${url}: HTTP ${result.status} ${result.statusText} (via primed browser)`);
     }
-    return await res.text();
+    return result.body;
   }
 
   /** Undici-first, browser-fallback on Cloudflare-shaped failures. */
@@ -415,7 +442,8 @@ export class DreambornAdapter implements SourceAdapter {
     if (this.browser) {
       await this.browser.close().catch(() => undefined);
       this.browser = null;
-      this.requestContext = null;
+      this.context = null;
+      this.primedPage = null;
     }
   }
 
