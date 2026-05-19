@@ -61,11 +61,46 @@ jobs:
             echo "tag=$tag" >> "$GITHUB_OUTPUT"
           fi
 
+      # lorcana.gg is behind Cloudflare and intermittently 403s the
+      # scraper even with browser-like headers (see src/legality/fetch.ts).
+      # We mirror the cards.yml pattern: scrape non-fatally, then fall
+      # back to the prior cards-vN copies so the workflow can still
+      # decide "no diff -> nothing to do" instead of failing red every
+      # Monday. A genuine selector-drift bug still surfaces because the
+      # downstream "Compute diff vs prior" step will then see a real
+      # JSON-shape change.
       - name: Re-scrape from lorcana.gg
+        id: scrape
+        continue-on-error: true
         run: pnpm scrape:legality --out ./out
+
+      - name: Fall back to prior banlist + rotation if scrape failed
+        id: fallback
+        run: |
+          missing=0
+          for f in banlist.json rotation.json; do
+            if [ ! -f "./out/$f" ]; then
+              if [ -f "./prior/$f" ]; then
+                echo "::warning::scrape:legality didn't produce $f; reusing prior copy from ${{ steps.prior.outputs.tag }}"
+                mkdir -p ./out
+                cp "./prior/$f" "./out/$f"
+              else
+                echo "::error::scrape:legality didn't produce $f and no prior copy exists"
+                missing=1
+              fi
+            fi
+          done
+          # Only hard-fail if we have neither fresh data nor a prior to
+          # fall back to. That's the real "something is broken" signal.
+          if [ "$missing" = "1" ]; then exit 1; fi
+          # Surface that we fell back so the run is visibly yellow-ish.
+          if [ "${{ steps.scrape.outcome }}" != "success" ]; then
+            echo "scrape_failed=1" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Compute diff vs prior
         id: diff
+        if: steps.fallback.outputs.scrape_failed != '1'
         run: |
           # Normalise generatedAt before comparing — we don't want a
           # PR for a fresh timestamp on otherwise-identical content.
@@ -121,3 +156,16 @@ jobs:
       - name: Skip when unchanged
         if: steps.diff.outputs.changed == '0'
         run: echo "Banlist and rotation unchanged vs ${{ steps.prior.outputs.tag }} — nothing to publish."
+
+      - name: Surface scrape failure as a warning
+        if: steps.fallback.outputs.scrape_failed == '1'
+        run: |
+          {
+            echo "## scrape:legality failed — fell back to ${{ steps.prior.outputs.tag }}"
+            echo
+            echo "lorcana.gg returned a non-OK response (likely Cloudflare 403)."
+            echo "The workflow stayed green because the prior cards-vN release's"
+            echo "banlist/rotation are still authoritative until a fresh scrape lands."
+            echo "If this keeps happening, escalate the fetch path in"
+            echo "\`src/legality/fetch.ts\` (browser headers → Playwright)."
+          } >> "$GITHUB_STEP_SUMMARY"
