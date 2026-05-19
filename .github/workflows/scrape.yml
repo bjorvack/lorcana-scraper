@@ -7,6 +7,7 @@ name: scrape
 #   scrape-limitless  — 4-shard matrix, REST API
 #   scrape-lorcana-gg — 4-shard matrix, HTTP-only via dotgg
 #   scrape-topdeck    — 4-shard matrix, REST API (TOPDECK_API_KEY)
+#   scrape-dreamborn  — single job, dreamborn.ink trending snapshot
 #   merge             — stitch every shard artifact into one dataset
 #
 # Each source is run as a hash-modulo matrix (A1): every shard
@@ -332,10 +333,60 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  scrape-dreamborn:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # dreamborn.ink's trending listing is capped at 24 results per
+    # call (no pagination), so sharding adds no parallelism. Every
+    # run is one job, one synthetic "tournament", up to 24 decks.
+    # Deck-level dedup against the prior dataset means a deck that
+    # stays trending across days is only ingested once.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bjorvack"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download scrape inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-inputs
+
+      - name: Run pipeline (dreamborn.ink)
+        run: |
+          args=()
+          if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
+            args+=("--prior" "./prior/dataset.json")
+          fi
+          pnpm scrape:tournaments \
+            --cards ./cards/cards.json \
+            --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
+            --sources dreamborn.ink \
+            --out ./out "${args[@]}"
+
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-dreamborn
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   merge:
     # Run even if some shards failed — we still want to publish whatever
     # partial data made it through. `prepare` is non-negotiable though.
-    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-topdeck]
+    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-topdeck, scrape-dreamborn]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:

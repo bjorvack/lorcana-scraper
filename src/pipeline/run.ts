@@ -24,6 +24,7 @@ import {
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "../sources/types.js";
+import { DreambornAdapter } from "../sources/dreamborn.js";
 import { LimitlessAdapter } from "../sources/limitless.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { TopdeckAdapter } from "../sources/topdeck.js";
@@ -659,6 +660,18 @@ function applyAdapterOptions(
       onTournamentStart: opts.onTournamentStart,
     });
   }
+  if (adapter instanceof DreambornAdapter) {
+    return new DreambornAdapter({
+      priorSeen: opts.priorSeen,
+      priorDecksSeen: opts.priorDecksSeen,
+      maxResults: opts.maxResults,
+      maxDecksPerTournament: opts.maxDecksPerTournament,
+      requestSpacingMs: opts.requestSpacingMs,
+      onDeckFetched: opts.onDeckFetched,
+      onDeckScraped: opts.onDeckScraped,
+      onTournamentStart: opts.onTournamentStart,
+    });
+  }
   return adapter;
 }
 
@@ -680,6 +693,15 @@ function resolveCard(
     const byPrinting = index.byPrinting.get(printing.key);
     if (byPrinting) return byPrinting;
   }
+  // Direct display-name lookup. Used by adapters that emit
+  // ``Name - Version`` strings directly (e.g. dreamborn.ink, which
+  // serves pbCode-decoded names rather than setCode-NNN ids).
+  // Doing this *before* the dotgg fallback means a clean name match
+  // wins even if the dotgg cache is stale.
+  const byExactDisplay = index.byExact.get(rawName);
+  if (byExactDisplay) return byExactDisplay;
+  const byNormalisedDisplay = index.byNormalised.get(normaliseKey(rawName));
+  if (byNormalisedDisplay) return byNormalisedDisplay;
   if (dotggIndex) {
     const entry = dotggIndex.byId.get(rawName);
     if (entry) {

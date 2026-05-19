@@ -1,4 +1,5 @@
 import type { SourceAdapter } from "./types.js";
+import { dreamborn } from "./dreamborn.js";
 import { limitless } from "./limitless.js";
 import { lorcanaGg } from "./lorcana-gg.js";
 import { topdeck } from "./topdeck.js";
@@ -17,6 +18,12 @@ import { topdeck } from "./topdeck.js";
  *   Lorcana coverage is currently sparse but the adapter is wired so
  *   future events land automatically. Disabled at runtime when the
  *   secret isn't set.
+ * - ``dreamborn.ink`` — community deck repository. No tournament
+ *   data per se; each daily run snapshots up to 24 trending
+ *   user-built decks tagged ``archetype:competitive`` and projects
+ *   them into a synthetic "tournament". Deck-level dedup
+ *   (priorDecksSeen) means a deck that stays trending across days
+ *   is only ingested once.
  *
  * Retired adapters (kept here as a note so we don't reintroduce them):
  * - ``inkdecks.com`` — was Playwright-driven; every endpoint sat
@@ -26,4 +33,4 @@ import { topdeck } from "./topdeck.js";
  * - ``legacy-cache`` — vendored tarball of the original
  *   lorcana-deck-generator snapshot. Superseded by the live APIs.
  */
-export const adapters: readonly SourceAdapter[] = [limitless, lorcanaGg, topdeck];
+export const adapters: readonly SourceAdapter[] = [limitless, lorcanaGg, topdeck, dreamborn];
