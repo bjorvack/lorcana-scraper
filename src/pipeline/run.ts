@@ -220,6 +220,10 @@ export async function runTournamentsPipeline(opts: RunOptions): Promise<RunResul
         index,
         dotggIndex,
         report,
+        // Streaming partials only persist progress to disk; the
+        // report is updated authoritatively from the final
+        // post-fetchTournament projection a few lines below.
+        silent: true,
       });
       if (partial) {
         try {
@@ -440,17 +444,30 @@ function resolveMaxFor(
   return undefined;
 }
 
-function projectTournament(args: {
+export function projectTournament(args: {
   adapterName: string;
   ref: { sourceUrl: string; name?: string; date?: string };
   raw: RawTournament;
   index: CardIndex;
   dotggIndex: DotggNameIndex | null;
   report: ReportBuilder;
+  /**
+   * When true, all `report.note*` calls inside this projection are
+   * skipped. Used by the per-deck streaming snapshot path
+   * (``persistStreaming``) which re-projects the accumulated decks
+   * after every emitted deck — without this guard, ``decksKept``,
+   * ``cardsTotal``, ``decksWithUnresolved`` etc. inflate by
+   * ``N(N+1)/2 + N`` for an N-deck tournament instead of N. The
+   * final non-streaming projection (called once per tournament)
+   * leaves this false so the report still gets populated.
+   */
+  silent?: boolean;
 }): TournamentT | null {
-  const { adapterName, raw, index, dotggIndex, report } = args;
+  const { adapterName, raw, index, dotggIndex, report, silent } = args;
   const decks = raw.decks
-    .map((rawDeck) => projectDeck(adapterName, raw, rawDeck, index, dotggIndex, report))
+    .map((rawDeck) =>
+      projectDeck(adapterName, raw, rawDeck, index, dotggIndex, report, silent === true),
+    )
     .filter((d): d is TournamentT["decks"][number] => d !== null);
   if (decks.length === 0) return null;
 
@@ -497,6 +514,7 @@ function projectDeck(
   index: CardIndex,
   dotggIndex: DotggNameIndex | null,
   report: ReportBuilder,
+  silent: boolean,
 ): TournamentT["decks"][number] | null {
   const resolvedCards: { cardId: string; count: number }[] = [];
   const inksUsed = new Set<InkT>();
@@ -505,16 +523,16 @@ function projectDeck(
   for (const { rawName, count } of raw.cards) {
     const card = resolveCard(rawName, index, dotggIndex);
     if (card) {
-      report.noteCard(sourceName, rawName, true);
+      if (!silent) report.noteCard(sourceName, rawName, true);
       resolvedCards.push({ cardId: card.id, count });
       for (const ink of card.inks) inksUsed.add(ink);
     } else {
-      report.noteCard(sourceName, rawName, false);
+      if (!silent) report.noteCard(sourceName, rawName, false);
       unresolvedByRawName.set(rawName, (unresolvedByRawName.get(rawName) ?? 0) + 1);
     }
   }
 
-  if (unresolvedByRawName.size > 0) {
+  if (unresolvedByRawName.size > 0 && !silent) {
     let total = 0;
     for (const v of unresolvedByRawName.values()) total += v;
     report.noteAffectedDeck({
@@ -567,7 +585,7 @@ function projectDeck(
     externalKey: externalKey(sourceName, deckId),
     ...(raw.externalUrl ? { externalUrl: raw.externalUrl } : {}),
   };
-  report.noteDeckKept(sourceName);
+  if (!silent) report.noteDeckKept(sourceName);
   return {
     placement: raw.placement ?? null,
     player: raw.player ?? null,
