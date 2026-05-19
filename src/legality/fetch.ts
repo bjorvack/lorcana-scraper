@@ -129,8 +129,8 @@ export async function fetchHtmlBrowser(url: string): Promise<string> {
       userAgent: USER_AGENT,
       locale: "en-US",
       extraHTTPHeaders: {
-        "accept-language": BROWSER_HEADERS["accept-language"],
-        referer: BROWSER_HEADERS.referer,
+        "accept-language": "en-US,en;q=0.9",
+        referer: "https://lorcana.gg/",
       },
     });
     const page = await context.newPage();
