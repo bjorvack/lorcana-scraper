@@ -34,7 +34,7 @@ import {
   spacelessKey,
   type CardIndex,
 } from "../resolve/cardIndex.js";
-import { normaliseKey } from "../resolve/normalise.js";
+import { levenshtein, normaliseKey } from "../resolve/normalise.js";
 import {
   defaultDotggCachePath,
   loadDotggNameIndex,
@@ -680,13 +680,59 @@ function applyAdapterOptions(
   return adapter;
 }
 
+/** Max edit distance allowed by the Levenshtein fallback in
+ * ``resolveCard``. Tightly bounded: typo / spacing / pluralisation
+ * drift is realistically 1-2 edits in normalised space; anything
+ * larger is far more likely a genuinely different card. */
+const FUZZY_MAX_DISTANCE = 2;
+
+/** Last-resort fuzzy match against the normalised display-name
+ * index. Returns ``null`` when no card sits within
+ * ``FUZZY_MAX_DISTANCE`` edits OR when two or more cards tie at
+ * the minimum distance (the resolver must never silently pick one
+ * of two equally-close real cards — let it fall through and the
+ * affected deck will show up in ``decks-needing-review.json``).
+ *
+ * Walks the full ``byNormalised`` map; the per-key Levenshtein call
+ * is bounded so this is roughly O(N · max) per unresolved card,
+ * which only runs after the four faster strategies all miss. */
+export function resolveByEditDistance<V>(rawName: string, byNormalised: Map<string, V>): V | null {
+  const target = normaliseKey(rawName);
+  if (target.length === 0) return null;
+  let bestDist = FUZZY_MAX_DISTANCE + 1;
+  let bestValue: V | null = null;
+  let bestCount = 0;
+  for (const [key, value] of byNormalised) {
+    // Length-difference cheap-skip mirrors the one inside
+    // ``levenshtein`` itself, but avoids the function-call overhead
+    // when most catalog entries are obviously too far away.
+    if (Math.abs(key.length - target.length) > FUZZY_MAX_DISTANCE) continue;
+    const d = levenshtein(target, key, FUZZY_MAX_DISTANCE);
+    if (d > FUZZY_MAX_DISTANCE) continue;
+    if (d < bestDist) {
+      bestDist = d;
+      bestValue = value;
+      bestCount = 1;
+    } else if (d === bestDist) {
+      bestCount += 1;
+    }
+  }
+  return bestCount === 1 ? bestValue : null;
+}
+
 /**
  * Resolve a dotgg printing id to a Lorcast `Card`. Strategy, in order:
  *   1. Direct printing-id match (`<setCode>-<NNN>` → Card via parsePrintingId).
- *   2. dotgg name fallback: look up the printing id in dotgg's full card
- *      catalog → get (name, title) → match Lorcast by display name.
- *      Catches `C1`/`Q1`/`Q2` and letter-suffix variants like `P2-024B`.
- *   3. Normalised-name fallback (accent-stripped, lowercased).
+ *   2. Direct display-name match against ``byExact`` / ``byNormalised`` /
+ *      ``bySpaceless`` (for adapters that emit ``Name - Version`` strings).
+ *   3. dotgg name fallback: look up the printing id in dotgg's full
+ *      card catalog → get (name, title) → try the same three indices
+ *      using the dotgg-canonical display name. Catches ``C1``/``Q1``/
+ *      ``Q2`` and letter-suffix variants like ``P2-024B``.
+ *   4. Bounded-Levenshtein fuzzy match against ``byNormalised``.
+ *      Catches typo / pluralisation drift the static indices miss.
+ *      Falls back to ``null`` if no card is within 2 edits or if
+ *      two cards tie at the minimum distance.
  */
 function resolveCard(
   rawName: string,
@@ -738,6 +784,12 @@ function resolveCard(
       }
     }
   }
+  // Last-resort: bounded Levenshtein over the normalised display
+  // names. Catches small typos / pluralisation drift not handled
+  // above. Returns null on ambiguous (multi-card tie) matches so we
+  // never silently merge two real cards.
+  const fuzzy = resolveByEditDistance(rawName, index.byNormalised);
+  if (fuzzy) return fuzzy;
   return null as CardIndex["byPrinting"] extends Map<unknown, infer V> ? V | null : never;
 }
 
