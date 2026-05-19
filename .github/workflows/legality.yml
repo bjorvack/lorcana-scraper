@@ -47,6 +47,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Headless Chromium for the Playwright escalation path in
+      # src/legality/fetch.ts. Cloudflare 403s the undici fetch from
+      # GitHub-hosted runner IP ranges; the Playwright fallback fixes
+      # that. Cached by version via the pnpm-store / playwright cache
+      # contract so subsequent runs are near-free.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Download current cards-vN legality assets
         id: prior
         env:
