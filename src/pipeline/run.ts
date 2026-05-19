@@ -28,7 +28,12 @@ import { DreambornAdapter } from "../sources/dreamborn.js";
 import { LimitlessAdapter } from "../sources/limitless.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
 import { TopdeckAdapter } from "../sources/topdeck.js";
-import { buildCardIndex, parsePrintingId, type CardIndex } from "../resolve/cardIndex.js";
+import {
+  buildCardIndex,
+  parsePrintingId,
+  spacelessKey,
+  type CardIndex,
+} from "../resolve/cardIndex.js";
 import { normaliseKey } from "../resolve/normalise.js";
 import {
   defaultDotggCachePath,
@@ -700,16 +705,31 @@ function resolveCard(
   // wins even if the dotgg cache is stale.
   const byExactDisplay = index.byExact.get(rawName);
   if (byExactDisplay) return byExactDisplay;
-  const byNormalisedDisplay = index.byNormalised.get(normaliseKey(rawName));
+  const normalisedDisplay = normaliseKey(rawName);
+  const byNormalisedDisplay = index.byNormalised.get(normalisedDisplay);
   if (byNormalisedDisplay) return byNormalisedDisplay;
+  // Spaceless lookup. Catches cross-source rename drift where the
+  // same card is rendered with different internal spacing — e.g.
+  // dreamborn's ``Tweedle Dee & Tweedle Dum`` vs Lorcast's
+  // ``Tweedledee & Tweedledum``. The map value is ``null`` when two
+  // or more cards collapse to the same spaceless key (preserved
+  // from index build) so we never silently merge two real cards;
+  // the resolver just falls through to the next strategy and
+  // ultimately surfaces an unresolved entry in
+  // ``decks-needing-review.json``.
+  const bySpacelessDisplay = index.bySpaceless.get(spacelessKey(normalisedDisplay));
+  if (bySpacelessDisplay) return bySpacelessDisplay;
   if (dotggIndex) {
     const entry = dotggIndex.byId.get(rawName);
     if (entry) {
       const displayName = entry.title ? `${entry.name} - ${entry.title}` : entry.name;
       const byExact = index.byExact.get(displayName);
       if (byExact) return byExact;
-      const byNormalised = index.byNormalised.get(normaliseKey(displayName));
+      const normalisedFromDotgg = normaliseKey(displayName);
+      const byNormalised = index.byNormalised.get(normalisedFromDotgg);
       if (byNormalised) return byNormalised;
+      const bySpaceless = index.bySpaceless.get(spacelessKey(normalisedFromDotgg));
+      if (bySpaceless) return bySpaceless;
       // Single-printing fallback: if a card with this name has exactly one
       // printing in Lorcast, use it (handles minor title spelling drift).
       if (!entry.title) {
