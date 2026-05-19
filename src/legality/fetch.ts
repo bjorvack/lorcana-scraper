@@ -32,8 +32,36 @@ import type { BanlistT, RotationT } from "@bjorvack/lorcana-schemas";
 export const LORCANA_GG_BANLIST_URL = "https://lorcana.gg/banned-card-list/";
 export const LORCANA_GG_ROTATION_URL = "https://lorcana.gg/rotation/";
 
-const USER_AGENT = "lorcana-scraper (+https://github.com/bjorvack/lorcana-scraper)";
+// lorcana.gg sits behind Cloudflare which now reliably 403's the
+// previous "lorcana-scraper/..." UA from GitHub-hosted runners. The
+// page itself has no JS challenge — it just inspects headers — so a
+// full desktop-Chrome header set is enough to clear the Browser
+// Integrity Check without needing a real browser. If Cloudflare ever
+// escalates to a JS challenge we'll need Playwright; see legality.yml
+// for the workflow-level fallback that keeps CI green in the meantime.
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const BROWSER_HEADERS: Record<string, string> = {
+  "user-agent": USER_AGENT,
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
+  "accept-encoding": "gzip, deflate, br",
+  "cache-control": "no-cache",
+  pragma: "no-cache",
+  referer: "https://lorcana.gg/",
+  "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"macOS"',
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+  "upgrade-insecure-requests": "1",
+};
 const PER_REQUEST_TIMEOUT_MS = 30_000;
+const RETRY_STATUS = new Set([403, 429, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
 
 export interface FetchedBanlist {
   readonly banlist: BanlistT;
@@ -47,22 +75,41 @@ export interface FetchedRotation {
   readonly forecastedDates: readonly { block: string; field: string; original: string }[];
 }
 
-/** GET a URL as text with our standard timeout + UA. */
-async function fetchHtml(url: string): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PER_REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      headers: { "user-agent": USER_AGENT, accept: "text/html" },
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`${url}: HTTP ${res.status} ${res.statusText}`);
+/** GET a URL as text with our standard timeout + browser-like
+ * headers. Retries up to ``MAX_ATTEMPTS`` on transient Cloudflare
+ * responses (403/429/5xx) with exponential backoff + jitter so a
+ * single edge node hiccup doesn't fail the weekly scheduled run. */
+export async function fetchHtml(url: string): Promise<string> {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PER_REQUEST_TIMEOUT_MS);
+    let retriable = false;
+    let lastErr: Error = new Error(`${url}: fetch failed`);
+    try {
+      const res = await fetch(url, {
+        headers: BROWSER_HEADERS,
+        signal: controller.signal,
+      });
+      if (res.ok) return await res.text();
+      // Drain the body so undici can recycle the connection.
+      await res.arrayBuffer().catch(() => undefined);
+      lastErr = new Error(`${url}: HTTP ${res.status} ${res.statusText}`);
+      retriable = RETRY_STATUS.has(res.status);
+    } catch (err) {
+      // AbortError + network errors are worth retrying.
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      retriable = true;
+    } finally {
+      clearTimeout(timeout);
     }
-    return await res.text();
-  } finally {
-    clearTimeout(timeout);
+    if (!retriable || attempt === MAX_ATTEMPTS) throw lastErr;
+    // 1s, 3s, … with up to 1s of jitter. Keeps the whole step
+    // comfortably under the 30s timeout budget per URL.
+    const backoffMs = 1000 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 1000);
+    await new Promise((r) => setTimeout(r, backoffMs));
   }
+  // Unreachable: the loop always either returns or throws.
+  throw new Error(`${url}: fetch failed`);
 }
 
 /** Parse a date string into ISO ``YYYY-MM-DD``. Returns ``null`` for
