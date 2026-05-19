@@ -53,7 +53,10 @@ export class HttpCache {
       const parsed = JSON.parse(raw) as CacheEnvelope<T> | T;
       if (isEnvelope(parsed)) {
         const age = Date.now() - new Date(parsed.fetchedAt).getTime();
-        if (age > maxAgeMs) {
+        // `>=` so a maxAgeMs of 0 always expires, even when the cache
+        // entry was written in the same millisecond as the read (which
+        // happens on fast CI runners and made the C1 test flake).
+        if (age >= maxAgeMs) {
           this.misses++;
           return null;
         }
