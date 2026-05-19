@@ -37,10 +37,24 @@
  * limits. A snapshot is at most 8 listing calls plus up to ~80
  * per-deck HTML fetches (~50KB each), so a typical daily run is
  * well under 100 requests. We pace at 500ms to be polite.
+ *
+ * Cloudflare bypass: dreamborn.ink sits behind Cloudflare which
+ * 403s the undici fetch from GitHub-runner IP ranges (verified
+ * in run 26101600629 — every slice returned HTTP 403 Forbidden).
+ * We mirror the legality.yml pattern: undici first (fast, works
+ * locally), and on a 403/429/5xx escalate to a Playwright-backed
+ * fetch that uses a real Chromium TLS profile. The browser context
+ * is lazy-launched on the first escalation and reused for every
+ * subsequent request in the same run, so we pay the chromium-spawn
+ * cost at most once per snapshot. Closed via the adapter's
+ * ``close()`` hook which run.ts already invokes after each run.
  */
 
 import { createHash } from "node:crypto";
 import { fetch } from "undici";
+// Playwright is loaded *lazily* below — keep the import type-only at
+// module scope so the unit suite doesn't drag chromium into memory.
+import type { APIRequestContext, Browser } from "playwright";
 
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./types.js";
 
@@ -292,7 +306,10 @@ function todayIso(now: Date = new Date()): string {
   return now.toISOString().slice(0, 10);
 }
 
-async function timedFetch(url: string): Promise<string> {
+/** Plain undici GET with timeout + retry-on-transient. 4xx (other
+ * than 429) is thrown immediately so the outer ``fetchText`` can
+ * decide whether to escalate to a real browser. */
+async function undiciFetch(url: string): Promise<string> {
   let lastErr: Error = new Error(`${url}: fetch failed`);
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const ctrl = new AbortController();
@@ -305,8 +322,9 @@ async function timedFetch(url: string): Promise<string> {
       if (res.ok) return await res.text();
       await res.arrayBuffer().catch(() => undefined);
       lastErr = new Error(`${url}: HTTP ${res.status} ${res.statusText}`);
-      // Only 5xx + 429 are worth retrying. 4xx (other than 429) is a
-      // request bug, not transient.
+      // Only 5xx + 429 are worth retrying here. Cloudflare 403 is
+      // persistent for the runner IP so retrying just burns time —
+      // throw immediately and let the caller escalate to Playwright.
       if (res.status !== 429 && res.status < 500) throw lastErr;
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
@@ -319,14 +337,86 @@ async function timedFetch(url: string): Promise<string> {
   throw lastErr;
 }
 
+/** Returns ``true`` when the error message looks like a Cloudflare
+ * (or upstream-Cloudflare-shaped) wall — 403/429/5xx. Anything else
+ * propagates so a real DNS / parse problem doesn't get masked by a
+ * 30-second browser launch. */
+function isCloudflareShaped(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /HTTP (?:403|429|5\d\d)\b/.test(msg);
+}
+
 export class DreambornAdapter implements SourceAdapter {
   readonly sourceName = SOURCE_NAME;
   private readonly opts: DreambornAdapterOptions;
   private readonly rateLimiter: RateLimiter;
+  // Lazy-launched browser session — kept null until we hit a 403
+  // and need to escalate. Reused for every subsequent request in
+  // the same adapter run, then disposed via ``close()`` from the
+  // pipeline's adapter shutdown hook.
+  private browser: Browser | null = null;
+  private requestContext: APIRequestContext | null = null;
 
   constructor(opts: DreambornAdapterOptions = {}) {
     this.opts = opts;
     this.rateLimiter = new RateLimiter(opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS);
+  }
+
+  /** Lazily spawn a headless Chromium and return its
+   * ``APIRequestContext`` — a request-only interface that uses
+   * the browser's TLS profile (which Cloudflare actually inspects)
+   * without spinning up a full DOM. Cheaper than a real
+   * ``page.goto`` and returns raw response bodies that the JSON /
+   * HTML parsers above can consume directly. */
+  private async getBrowserRequest(): Promise<APIRequestContext> {
+    if (this.requestContext) return this.requestContext;
+    const { chromium } = await import("playwright");
+    this.browser = await chromium.launch({ headless: true });
+    const context = await this.browser.newContext({
+      userAgent: USER_AGENT,
+      locale: "en-US",
+      extraHTTPHeaders: {
+        "accept-language": "en-US,en;q=0.9",
+        referer: `${BASE}/`,
+      },
+    });
+    this.requestContext = context.request;
+    return this.requestContext;
+  }
+
+  /** Fetch raw response text via the browser context. Treats any
+   * non-2xx as a hard failure — by the time we're here undici
+   * has already given up, so a second 403 means Cloudflare is
+   * actively blocking even the browser fingerprint and there's
+   * nothing left to try. */
+  private async browserFetch(url: string): Promise<string> {
+    const req = await this.getBrowserRequest();
+    const res = await req.get(url, { timeout: PER_REQUEST_TIMEOUT_MS });
+    if (!res.ok()) {
+      throw new Error(`${url}: HTTP ${res.status()} ${res.statusText()} (via browser)`);
+    }
+    return await res.text();
+  }
+
+  /** Undici-first, browser-fallback on Cloudflare-shaped failures. */
+  private async fetchText(url: string): Promise<string> {
+    try {
+      return await undiciFetch(url);
+    } catch (err) {
+      if (!isCloudflareShaped(err)) throw err;
+      process.stderr.write(
+        `[${SOURCE_NAME}] ${(err as Error).message} — escalating to headless browser\n`,
+      );
+      return await this.browserFetch(url);
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.browser) {
+      await this.browser.close().catch(() => undefined);
+      this.browser = null;
+      this.requestContext = null;
+    }
   }
 
   async listTournaments(): Promise<TournamentRef[]> {
@@ -359,7 +449,7 @@ export class DreambornAdapter implements SourceAdapter {
       await this.rateLimiter.acquire();
       let raw: string;
       try {
-        raw = await timedFetch(`${BASE}${path}`);
+        raw = await this.fetchText(`${BASE}${path}`);
       } catch (err) {
         process.stderr.write(
           `[${SOURCE_NAME}] listing slice ${path} failed: ${
@@ -406,7 +496,7 @@ export class DreambornAdapter implements SourceAdapter {
       await this.rateLimiter.acquire();
       let html: string;
       try {
-        html = await timedFetch(url);
+        html = await this.fetchText(url);
       } catch {
         this.opts.onDeckFetched?.({ resolved: false, failed: true });
         continue;
