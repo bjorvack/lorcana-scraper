@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { CardT } from "@bjorvack/lorcana-schemas";
-import { buildCardIndex, parsePrintingId, printingKey } from "../../src/resolve/cardIndex.js";
+import {
+  buildCardIndex,
+  parsePrintingId,
+  printingKey,
+  spacelessKey,
+} from "../../src/resolve/cardIndex.js";
 
 function card(o: Partial<CardT>): CardT {
   return {
@@ -102,5 +107,51 @@ describe("buildCardIndex", () => {
 
   it("indexes by lowercase name (one→many)", () => {
     expect(idx.byNameVersion.get("ariel")).toContain(a);
+  });
+});
+
+describe("spacelessKey", () => {
+  it("strips internal whitespace and punctuation that survives normalisation", () => {
+    expect(spacelessKey("tweedle dee tweedle dum")).toBe("tweedledeetweedledum");
+    expect(spacelessKey("hello-world 123")).toBe("helloworld123");
+  });
+
+  it("is idempotent on already-spaceless input", () => {
+    expect(spacelessKey("tweedledee")).toBe("tweedledee");
+  });
+});
+
+describe("buildCardIndex.bySpaceless", () => {
+  // Real-world failure: dreamborn renders ``Tweedle Dee & Tweedle Dum``
+  // but Lorcast catalogs the same card as ``Tweedledee & Tweedledum``.
+  // The byNormalised lookup misses because the embedded space differs,
+  // but the spaceless index collapses both to the same key.
+  const tweedles = card({
+    id: "tdd",
+    name: "Tweedledee & Tweedledum",
+    version: "Strange Storytellers",
+  });
+  const idx = buildCardIndex([tweedles]);
+
+  it("matches a name whose internal spacing drifted from the catalog", () => {
+    const incoming = "Tweedle Dee & Tweedle Dum - Strange Storytellers";
+    const key = spacelessKey(
+      incoming
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase(),
+    );
+    expect(idx.bySpaceless.get(key)).toBe(tweedles);
+  });
+
+  it("preserves null (ambiguous) when two real cards collapse to the same spaceless key", () => {
+    // Synthetic: if some future expansion did publish both
+    // ``Tweedledee & Tweedledum`` and ``Tweedle Dee & Tweedle Dum``
+    // as separate cards, the spaceless index must NOT silently
+    // pick one. Encode that contract here.
+    const a = card({ id: "a", name: "Tweedledee & Tweedledum", version: "X" });
+    const b = card({ id: "b", name: "Tweedle Dee & Tweedle Dum", version: "X" });
+    const dual = buildCardIndex([a, b]);
+    expect(dual.bySpaceless.get("tweedledeetweedledumx")).toBeNull();
   });
 });

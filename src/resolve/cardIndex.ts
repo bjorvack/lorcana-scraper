@@ -7,12 +7,30 @@ import { normaliseKey } from "./normalise.js";
  * For the lorcana.gg adapter only `byPrinting` is consulted (deterministic
  * `<setCode>-<NNN>` → `Card` lookup). The string-based maps are retained
  * for the inevitable future source that emits card names.
+ *
+ * ``bySpaceless`` is a third-tier fuzzy index that strips *all*
+ * non-alphanumerics (including spaces) from the normalised key. It
+ * catches upstream renames where a name's internal spacing drifts —
+ * e.g. dreamborn's ``Tweedle Dee & Tweedle Dum`` vs Lorcast's
+ * ``Tweedledee & Tweedledum``. The map value is ``null`` when two or
+ * more real cards collapse to the same spaceless key, so an
+ * ambiguous match never silently picks a side; the resolver treats
+ * ``null`` as "unresolved" and surfaces it in
+ * ``decks-needing-review.json``.
  */
 export interface CardIndex {
   readonly byPrinting: Map<string, CardT>;
   readonly byExact: Map<string, CardT>;
   readonly byNameVersion: Map<string, CardT[]>;
   readonly byNormalised: Map<string, CardT>;
+  readonly bySpaceless: Map<string, CardT | null>;
+}
+
+/** Strip whitespace (and any remaining punctuation that survived
+ * ``normaliseKey``) from a normalised key. Used to defuse minor
+ * source-vs-source spacing drift in card names. */
+export function spacelessKey(key: string): string {
+  return key.replace(/[^a-z0-9]+/g, "");
 }
 
 export function buildCardIndex(cards: readonly CardT[]): CardIndex {
@@ -20,6 +38,11 @@ export function buildCardIndex(cards: readonly CardT[]): CardIndex {
   const byExact = new Map<string, CardT>();
   const byNameVersion = new Map<string, CardT[]>();
   const byNormalised = new Map<string, CardT>();
+  // First pass populates a per-key list; we collapse to a single
+  // card-or-null in the second pass so an ambiguous spaceless key
+  // (e.g. two cards that genuinely differ only by internal spacing)
+  // is preserved as ``null`` rather than silently overwritten.
+  const spacelessLists = new Map<string, CardT[]>();
 
   for (const c of cards) {
     byPrinting.set(printingKey(c.setCode, c.cardNumber), c);
@@ -32,10 +55,19 @@ export function buildCardIndex(cards: readonly CardT[]): CardIndex {
     list.push(c);
     byNameVersion.set(nv, list);
 
-    byNormalised.set(normaliseKey(displayName), c);
+    const normalised = normaliseKey(displayName);
+    byNormalised.set(normalised, c);
+
+    const spaceless = spacelessKey(normalised);
+    const slot = spacelessLists.get(spaceless) ?? [];
+    slot.push(c);
+    spacelessLists.set(spaceless, slot);
   }
 
-  return { byPrinting, byExact, byNameVersion, byNormalised };
+  const bySpaceless = new Map<string, CardT | null>();
+  for (const [k, cs] of spacelessLists) bySpaceless.set(k, cs.length === 1 ? cs[0]! : null);
+
+  return { byPrinting, byExact, byNameVersion, byNormalised, bySpaceless };
 }
 
 /** Canonical printing key: pads cardNumber to 3 digits. */
