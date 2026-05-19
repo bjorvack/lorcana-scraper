@@ -4,12 +4,15 @@
  *
  * Why a separate source: dreamborn is the largest community deck
  * repository for Lorcana and exposes a public listing endpoint at
- * ``/api/decks?sort=trending`` that returns ~24 trending deck
- * summaries (no auth, no Cloudflare). Decks are user-uploaded, not
- * tournament standings — there's no placement / record / opponent.
- * To fit the existing ``SourceAdapter`` contract we project each
- * daily run into a synthetic "tournament" grouping that day's
- * trending decks.
+ * ``/api/decks?sort=trending`` that returns 24 trending deck
+ * summaries per call (no auth, no Cloudflare). The endpoint is
+ * hard-capped at 24 results — pagination is silently broken on the
+ * server side — so we issue several orthogonal slice calls
+ * (trending, popular, per-color trending) and union the results by
+ * deck id. Decks are user-uploaded, not tournament standings —
+ * there's no placement / record / opponent. To fit the existing
+ * ``SourceAdapter`` contract we project each daily run into a
+ * synthetic "tournament" grouping that day's competitive decks.
  *
  * Deck-card data lives in the SSR HTML of each ``/decks/{id}``
  * page, inside a ``__NUXT_DATA__`` <script> block (Nuxt 3
@@ -31,9 +34,9 @@
  * server-side filter regression doesn't silently dilute the data.
  *
  * Rate limits: dreamborn is a Nuxt SSR site without documented
- * limits, but the per-deck HTML page is ~50KB each and the
- * trending list caps at 24, so a daily run does ≤25 requests.
- * We still pace at 500ms to be polite.
+ * limits. A snapshot is at most 8 listing calls plus up to ~80
+ * per-deck HTML fetches (~50KB each), so a typical daily run is
+ * well under 100 requests. We pace at 500ms to be polite.
  */
 
 import { createHash } from "node:crypto";
@@ -44,13 +47,36 @@ import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "./typ
 export const SOURCE_NAME = "dreamborn.ink";
 
 const BASE = "https://dreamborn.ink";
-// Server-side filter rather than client-side: dreamborn caps the
-// listing at 24 results, so without ``archetype=competitive`` we'd
-// get a mixed bag (casual / multiplayer / budget builds) and end
-// up with ~12 usable decks after filtering. Asking the server for
-// competitive-only gives us a full 24 tournament-shaped decks per
-// snapshot.
-const LIST_PATH = "/api/decks?sort=trending&archetype=competitive";
+// The /api/decks listing endpoint is hard-capped at 24 results per
+// call. Server-side pagination (``offset=<lastId>`` cursor) is
+// silently broken — the SPA emits it on infinite scroll but the
+// server rejects with HTTP 400. To extract more useful data per
+// snapshot we issue several orthogonal slice calls and union them
+// at the deck-id level. Each slice still caps at 24 but they
+// overlap only partially, so 8 calls yield ~50-80 unique decks.
+//
+// All slices apply ``archetype=competitive`` (the user-applied tag
+// for tournament-shape builds). Casual / multiplayer / budget
+// builds dilute the training set without adding tournament signal.
+// We additionally re-check the tag on each deck as defense-in-depth
+// in case the server-side filter silently regresses.
+const ARCHETYPE = "competitive";
+const COLORS = ["amber", "amethyst", "emerald", "ruby", "sapphire", "steel"] as const;
+function listingPaths(): readonly string[] {
+  // Trending + popular as the two top-level sorts (different
+  // ranking signals — trending = recent activity, popular = all-time
+  // likes). Then a per-color slice within trending+competitive,
+  // which surfaces colour-specific archetypes that don't make the
+  // global top-24. Order doesn't matter; we dedup by id below.
+  const paths = [
+    `/api/decks?sort=trending&archetype=${ARCHETYPE}`,
+    `/api/decks?sort=popular&archetype=${ARCHETYPE}`,
+  ];
+  for (const c of COLORS) {
+    paths.push(`/api/decks?sort=trending&archetype=${ARCHETYPE}&color=${c}`);
+  }
+  return paths;
+}
 const DEFAULT_REQUEST_SPACING_MS = 500;
 const PER_REQUEST_TIMEOUT_MS = 20_000;
 const MAX_ATTEMPTS = 3;
@@ -323,17 +349,41 @@ export class DreambornAdapter implements SourceAdapter {
   }
 
   async fetchTournament(ref: TournamentRef): Promise<RawTournament> {
-    await this.rateLimiter.acquire();
-    const listingRaw = await timedFetch(`${BASE}${LIST_PATH}`);
-    let summaries: DreambornDeckSummary[];
-    try {
-      const parsed = JSON.parse(listingRaw);
-      summaries = Array.isArray(parsed) ? (parsed as DreambornDeckSummary[]) : [];
-    } catch {
-      summaries = [];
+    // Union the orthogonal listing slices. Each is capped at 24
+    // server-side; together they cover ~3x more unique decks. Any
+    // slice that fails (network blip, server hiccup) is silently
+    // dropped — the other slices still contribute and the daily
+    // rerun will pick up the survivors.
+    const byId = new Map<string, DreambornDeckSummary>();
+    for (const path of listingPaths()) {
+      await this.rateLimiter.acquire();
+      let raw: string;
+      try {
+        raw = await timedFetch(`${BASE}${path}`);
+      } catch (err) {
+        process.stderr.write(
+          `[${SOURCE_NAME}] listing slice ${path} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed)) continue;
+      for (const s of parsed as DreambornDeckSummary[]) {
+        if (!s || typeof s.id !== "string") continue;
+        // First slice to mention a given id wins. All slices return
+        // the same per-deck fields so the choice is cosmetic.
+        if (!byId.has(s.id)) byId.set(s.id, s);
+      }
     }
 
-    const competitive = summaries.filter(
+    const competitive = [...byId.values()].filter(
       (s) => s.tags && Object.prototype.hasOwnProperty.call(s.tags, COMPETITIVE_TAG),
     );
     const limited =
