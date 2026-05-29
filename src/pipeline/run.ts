@@ -24,6 +24,7 @@ import {
 } from "@bjorvack/lorcana-schemas";
 import { adapters } from "../sources/index.js";
 import type { RawDeck, RawTournament, SourceAdapter, TournamentRef } from "../sources/types.js";
+import { ApiLorcanaAdapter } from "../sources/api-lorcana.js";
 import { DreambornAdapter } from "../sources/dreamborn.js";
 import { LimitlessAdapter } from "../sources/limitless.js";
 import { LorcanaGgAdapter } from "../sources/lorcana-gg.js";
@@ -667,6 +668,18 @@ function applyAdapterOptions(
   }
   if (adapter instanceof DreambornAdapter) {
     return new DreambornAdapter({
+      priorSeen: opts.priorSeen,
+      priorDecksSeen: opts.priorDecksSeen,
+      maxResults: opts.maxResults,
+      maxDecksPerTournament: opts.maxDecksPerTournament,
+      requestSpacingMs: opts.requestSpacingMs,
+      onDeckFetched: opts.onDeckFetched,
+      onDeckScraped: opts.onDeckScraped,
+      onTournamentStart: opts.onTournamentStart,
+    });
+  }
+  if (adapter instanceof ApiLorcanaAdapter) {
+    return new ApiLorcanaAdapter({
       priorSeen: opts.priorSeen,
       priorDecksSeen: opts.priorDecksSeen,
       maxResults: opts.maxResults,

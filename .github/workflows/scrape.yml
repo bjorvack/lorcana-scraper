@@ -333,14 +333,21 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  scrape-dreamborn:
+  scrape-api-lorcana:
     needs: prepare
     runs-on: ubuntu-latest
-    # dreamborn.ink's trending listing is capped at 24 results per
-    # call (no pagination), so sharding adds no parallelism. Every
-    # run is one job, one synthetic "tournament", up to 24 decks.
-    # Deck-level dedup against the prior dataset means a deck that
-    # stays trending across days is only ingested once.
+    # api-lorcana.com mirrors the dreamborn community deck graph
+    # via a plain unauthenticated JSON API — no Cloudflare, no
+    # browser, no sharding (one /decks call returns the full
+    # archive). Deck-level dedup against the prior dataset means a
+    # deck the API has already exposed is ingested exactly once.
+    #
+    # Replaces the previous scrape-dreamborn job: dreamborn.ink
+    # itself is Cloudflare-Turnstile-fronted and rejected every
+    # request from GitHub-Actions runner IP ranges even via the
+    # Playwright primed-page fallback. The DreambornAdapter is
+    # still in the registry for local / self-hosted runs but is
+    # no longer part of the scheduled CI matrix.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -362,16 +369,7 @@ jobs:
         with:
           name: scrape-inputs
 
-      # Chromium for the Playwright escalation path in
-      # src/sources/dreamborn.ts. dreamborn.ink is Cloudflare-fronted
-      # and 403s the undici fetch from GitHub-runner IPs; the
-      # Playwright APIRequestContext uses a real browser TLS profile
-      # which Cloudflare actually accepts. Lazy-loaded inside the
-      # adapter so this only matters when escalation fires.
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run pipeline (dreamborn.ink)
+      - name: Run pipeline (api-lorcana.com)
         run: |
           args=()
           if [ "${{ needs.prepare.outputs.have_prior }}" = "1" ]; then
@@ -380,14 +378,14 @@ jobs:
           pnpm scrape:tournaments \
             --cards ./cards/cards.json \
             --cards-release-tag "${{ needs.prepare.outputs.cards_tag }}" \
-            --sources dreamborn.ink \
+            --sources api-lorcana.com \
             --out ./out "${args[@]}"
 
       - name: Upload shard artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-dreamborn
+          name: shard-api-lorcana
           path: out/
           retention-days: 7
           if-no-files-found: ignore
@@ -395,7 +393,7 @@ jobs:
   merge:
     # Run even if some shards failed — we still want to publish whatever
     # partial data made it through. `prepare` is non-negotiable though.
-    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-topdeck, scrape-dreamborn]
+    needs: [prepare, scrape-limitless, scrape-lorcana-gg, scrape-topdeck, scrape-api-lorcana]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
